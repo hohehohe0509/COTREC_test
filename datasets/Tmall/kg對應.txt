@@ -1,0 +1,3 @@
+cat_id:0
+seller_id:1
+brand_id:2
