@@ -162,7 +162,7 @@ class COTREC(Module):
         self.glu2 = nn.Linear(self.emb_size, self.emb_size, bias=False)
 
         #這個要怎麼初始化比較好還要再看一下
-        #self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.emb_size, self.relation_embSize))
+        self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.emb_size, self.relation_embSize))
         #nn.init.xavier_uniform_(self.W_R, gain=nn.init.calculate_gain('relu'))
 
         self.adv_item = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
@@ -427,7 +427,7 @@ def train_test(model, train_data, test_data, epoch):
     print('start training: ', datetime.datetime.now())
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
-    '''
+    
     time1 = time()
     kg_total_loss = 0
     n_kg_batch = train_data.n_kg_data // train_data.kg_batch_size + 1
@@ -447,7 +447,7 @@ def train_test(model, train_data, test_data, epoch):
         model.optimizer.step()
         kg_total_loss += kg_batch_loss.item()
     print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
-    '''
+    
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
     for i in slices:
         model.zero_grad()

@@ -36,7 +36,7 @@ import torch
 #itemID是從1開始
 #但是KG是從0開始，所以要把KG的ID換成從1開始
 #這邊的n_node有算進KG的entity數
-'''
+
 def data_masks(all_sessions, n_node):
     indptr, indices, data = [], [], []
     indptr.append(0)
@@ -50,8 +50,8 @@ def data_masks(all_sessions, n_node):
             data.append(1)
     matrix = csr_matrix((data, indices, indptr), shape=(len(all_sessions), n_node))
     return matrix
-'''
 
+'''
 def data_masks(all_sessions, n_node):
     indptr, indices, data = [], [], []
     indptr.append(0)
@@ -65,7 +65,7 @@ def data_masks(all_sessions, n_node):
             data.append(count[i])
     matrix = csr_matrix((data, indices, indptr), shape=(len(all_sessions), n_node))
     return matrix
-
+'''
 class Data():
     def __init__(self, data, all_train, shuffle=False, n_node=None, KG=False, kg_batch_size=100):
         self.raw = np.asarray(data[0])
@@ -87,7 +87,7 @@ class Data():
         
         if KG:
             self.kg_batch_size = kg_batch_size
-            kg_data = self.load_kg('../datasets/movielen_20M/kg.txt')
+            kg_data = self.load_kg('../datasets/Tmall/kg.txt')
             print(time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime()), '-- kg data load --')
             self.construct_data(kg_data)
 

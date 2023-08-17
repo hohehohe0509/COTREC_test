@@ -6,7 +6,7 @@ import argparse
 import pickle
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
+parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--epoch', type=int, default=30, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
@@ -16,9 +16,9 @@ parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
 parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5, help='Lambda when calculating KG l2 loss.')
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--layer', type=float, default=2, help='the number of layer used')
-parser.add_argument('--beta', type=float, default=0.001, help='ssl task maginitude')
+parser.add_argument('--beta', type=float, default=0.01, help='ssl task maginitude')
 parser.add_argument('--lam', type=float, default=0.005, help='diff task maginitude')
-parser.add_argument('--eps', type=float, default=0.5, help='eps')
+parser.add_argument('--eps', type=float, default=0.2, help='eps')
 parser.add_argument('--filter', type=bool, default=False, help='filter incidence matrix')#多加的
 
 opt = parser.parse_args()
@@ -33,7 +33,9 @@ def main():
     if opt.dataset == 'diginetica':
         n_node = 43097
     elif opt.dataset == 'Tmall':
-        n_node = 40727
+        #n_node = 40727
+        #n_node = 41512
+        n_node = 50841
     elif opt.dataset == 'retailrocket':
         n_node = 36968
     elif opt.dataset == 'movielen_20M':
@@ -44,8 +46,8 @@ def main():
         n_node = 309
     train_data = Data(train_data,all_train, shuffle=True, n_node=n_node, KG=True, kg_batch_size=opt.kg_batch_size)
     test_data = Data(test_data,all_train, shuffle=True, n_node=n_node, KG=False)
-    #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,n_relations=train_data.n_relations,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
-    model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
+    model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,n_relations=train_data.n_relations,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
+    #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
     top_K = [5, 10, 20]
     best_results = {}
     for K in top_K:
