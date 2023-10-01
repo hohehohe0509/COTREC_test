@@ -34,7 +34,7 @@ def main():
         n_node = 43097
     elif opt.dataset == 'Tmall':
         #n_node = 40727
-        #n_node = 41512
+        #n_node = 41512 這是不包括知識圖譜的
         n_node = 50841
     elif opt.dataset == 'retailrocket':
         n_node = 36968
@@ -46,7 +46,12 @@ def main():
         n_node = 309
     train_data = Data(train_data,all_train, shuffle=True, n_node=n_node, KG=True, kg_batch_size=opt.kg_batch_size)
     test_data = Data(test_data,all_train, shuffle=True, n_node=n_node, KG=False)
+    #Attention
+    #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,raw=train_data.raw,itemTOsess = train_data.itemTOsess, n_node=n_node,n_relations=train_data.n_relations,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
+    
+    #有KG
     model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,n_relations=train_data.n_relations,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
+    
     #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
     top_K = [5, 10, 20]
     best_results = {}

@@ -55,6 +55,7 @@ def data_masks(all_sessions, n_node):
 def data_masks(all_sessions, n_node):
     indptr, indices, data = [], [], []
     indptr.append(0)
+    itemTOsess = [[] for row in range(n_node)]
     for j in range(len(all_sessions)):
         session, count = np.unique(all_sessions[j], return_counts=True)
         length = len(session)
@@ -62,13 +63,15 @@ def data_masks(all_sessions, n_node):
         indptr.append((s + length))
         for i in range(length):
             indices.append(session[i]-1)
+            itemTOsess[session[i]-1].append(j)
             data.append(count[i])
     matrix = csr_matrix((data, indices, indptr), shape=(len(all_sessions), n_node))
-    return matrix
+    return matrix, itemTOsess
 '''
 class Data():
     def __init__(self, data, all_train, shuffle=False, n_node=None, KG=False, kg_batch_size=100):
         self.raw = np.asarray(data[0])
+        
         H_T = data_masks(self.raw, n_node)
         BH_T = H_T.T.multiply(1.0/H_T.sum(axis=1).reshape(1, -1))
         BH_T = BH_T.T
@@ -77,6 +80,8 @@ class Data():
         DH = DH.T
         DHBH_T = np.dot(DH,BH_T)
         self.adjacency = DHBH_T.tocoo()
+        
+        #self.adjacency, self.itemTOsess = data_masks(self.raw, n_node)
         '''adj = data_masks(all_train, n_node)
         # # print(adj.sum(axis=0))
         self.adjacency = adj.multiply(1.0/adj.sum(axis=0).reshape(1, -1))'''

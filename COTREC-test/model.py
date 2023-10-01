@@ -6,7 +6,7 @@ from torch import nn, backends
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
 import torch.sparse
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix,csr_matrix
 from time import time
 import random
 from numba import jit
@@ -68,9 +68,9 @@ class HyperConv(Module):
         for i in range(self.layers):
             item_embeddings = torch.sparse.mm(trans_to_cuda(adjacency), item_embeddings)
             final.append(item_embeddings)
-      #  final1 = trans_to_cuda(torch.tensor([item.cpu().detach().numpy() for item in final]))
-      #  item_embeddings = torch.sum(final1, 0)
-        item_embeddings = np.sum(final, 0) / (self.layers+1)
+        final1 = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in final])))
+        item_embeddings = torch.sum(final1, dim=0) / (self.layers+1)
+        #item_embeddings = np.sum(torch.stack(final).to(device='cpu'), 0) / (self.layers+1)
         return item_embeddings
 
 class SessConv(Module):
@@ -90,7 +90,7 @@ class SessConv(Module):
         seq_h = []
         for i in torch.arange(len(session_item)):
             seq_h.append(torch.index_select(item_embedding, 0, session_item[i]))
-        seq_h1 = trans_to_cuda(torch.tensor([item.cpu().detach().numpy() for item in seq_h]))
+        seq_h1 = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in seq_h])))
         session_emb = torch.div(torch.sum(seq_h1, 1), session_len)
         session = [session_emb]
         DA = torch.mm(D, A).float()
@@ -98,13 +98,13 @@ class SessConv(Module):
             session_emb = trans_to_cuda(self.w_sess['weight_sess%d' % (i)])(session_emb)
             session_emb = torch.mm(DA, session_emb)
             session.append(F.normalize(session_emb, p=2, dim=-1))
-        sess = trans_to_cuda(torch.tensor([item.cpu().detach().numpy() for item in session]))
+        sess = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in session])))
         session_emb = torch.sum(sess, 0)/(self.layers+1)
         return session_emb
 
 
 class COTREC(Module):
-    def __init__(self, adjacency, n_node, lr, layers, l2, beta,lam,eps, dataset, kg_l2loss_lambda, n_relations=0, emb_size=100, batch_size=100, relation_embSize=100):
+    def __init__(self, adjacency, n_node, lr, layers, l2, beta,lam,eps, dataset, kg_l2loss_lambda, n_relations=0, emb_size=100, batch_size=100, relation_embSize=100, raw=0, itemTOsess=0):
         super(COTREC, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -122,8 +122,11 @@ class COTREC(Module):
         self.K = 10
         self.w_k = 10
         self.num = 5000
+        #self.raw = raw
+        #self.itemTOsess = itemTOsess
 
         ######
+        
         values = adjacency.data
         indices = np.vstack((adjacency.row, adjacency.col))
         if dataset == 'Nowplaying':
@@ -136,8 +139,10 @@ class COTREC(Module):
         v = torch.FloatTensor(values)
         shape = adjacency.shape
         adjacency = torch.sparse.FloatTensor(i, v, torch.Size(shape))
+        
         ######
 
+        #self.adjacency_init = adjacency
         self.adjacency = adjacency
         self.embedding = nn.Embedding(self.n_node, self.emb_size)
         #每個資料集的長度不一樣
@@ -164,6 +169,9 @@ class COTREC(Module):
         #這個要怎麼初始化比較好還要再看一下
         self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.emb_size, self.relation_embSize))
         #nn.init.xavier_uniform_(self.W_R, gain=nn.init.calculate_gain('relu'))
+
+        #用在注意力層
+        self.a = nn.Parameter(torch.Tensor(2 * self.emb_size, 1))
 
         self.adv_item = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
         self.adv_sess = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
@@ -262,7 +270,7 @@ class COTREC(Module):
         score_sess = torch.mul(score_sess, diff_mask)
         score_adv1 = torch.mul(score_adv1, diff_mask)
         score_adv2 = torch.mul(score_adv2, diff_mask)
-
+        #不知道有沒有寫反
         h1 = torch.sum(torch.mul(score_item, torch.log(1e-8 + ((score_item + 1e-8)/(score_adv2 + 1e-8)))))
         h2 = torch.sum(torch.mul(score_sess, torch.log(1e-8 + ((score_sess + 1e-8)/(score_adv1 + 1e-8)))))
 
@@ -333,12 +341,14 @@ class COTREC(Module):
     def train_loss(self, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding.weight)
         if self.dataset == 'Tmall':
+        #if self.dataset == '':
             # for Tmall dataset, we do not use position embedding to learn temporal order
             sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
         else:
             sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
         sess_emb_i = self.w_k * F.normalize(sess_emb_i, dim=-1, p=2)
         item_embeddings_i = F.normalize(item_embeddings_i, dim=-1, p=2)
+        
         scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i, 1, 0))
         loss_item = self.loss_function(scores_item, tar)
 
@@ -369,17 +379,19 @@ class COTREC(Module):
         score_adv2 = torch.mm(sess_emb_i, torch.transpose(adv_emb_sess, 1, 0))
         # add difference constraint
         loss_diff = self.diff(scores_item, scores_sess, score_adv2, score_adv1, diff_mask)
-        return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
+        #41512是只有item沒有entity
+        return self.beta * con_loss, loss_item, scores_item[:41512], loss_diff*self.lam
 
     def test_loss(self, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding.weight)
         if self.dataset == 'Tmall':
+        #if self.dataset == '':
             sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
         else:
             sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
         sess_emb_i = self.w_k * F.normalize(sess_emb_i, dim=-1, p=2)
         item_embeddings_i = F.normalize(item_embeddings_i, dim=-1, p=2)
-        scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i, 1, 0))
+        scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i[:41512], 1, 0))
         loss_item = self.loss_function(scores_item, tar)
         loss_diff = 0
         con_loss = 0
@@ -428,6 +440,7 @@ def train_test(model, train_data, test_data, epoch):
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
     
+    
     time1 = time()
     kg_total_loss = 0
     n_kg_batch = train_data.n_kg_data // train_data.kg_batch_size + 1
@@ -447,7 +460,57 @@ def train_test(model, train_data, test_data, epoch):
         model.optimizer.step()
         kg_total_loss += kg_batch_loss.item()
     print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
-    
+    '''
+    #先算出所有hyperedge的embedding
+    adjacency = model.adjacency_init
+    adjacency_inverse = adjacency.T
+    value = []
+    e_embedding = []
+
+    for j in range(len(model.raw)):
+        session, count = np.unique(model.raw[j], return_counts=True)
+        raw = trans_to_cuda(torch.Tensor(model.raw[j]).long())
+        #if len(session)==1:
+        #    e_embedding.append(model.embedding(raw-1))
+        #    continue
+        session = trans_to_cuda(torch.Tensor(session-1).long())
+        count = trans_to_cuda(torch.Tensor(count).long())
+        edge_embedding = sum(model.embedding(raw-1))/sum(count)
+        e_embedding.append(edge_embedding)
+
+    print("finish")
+    e_embedding = np.array(e_embedding)    
+
+    #再來算每個的注意力分
+    for j in range(len(model.raw)):
+        session, count = np.unique(model.raw[j], return_counts=True)
+        raw = trans_to_cuda(torch.Tensor(model.raw[j]).long())
+        session = trans_to_cuda(torch.Tensor(session-1).long())
+        for i in session:
+            #先取出這個item有和哪幾個hyperedge連
+            session_num = model.itemTOsess[i]
+            if len(session_num)==1:
+                value.append(1)
+                continue
+            #score = sim(model.embedding(i), e_embedding[session_num], e_embedding[j], model.a)
+            score = sim(model.embedding(i),  e_embedding[session_num].tolist(), e_embedding[j].tolist(), model.a)
+            value.append(score)
+
+    H_T = csr_matrix((value, adjacency.indices, adjacency.indptr), shape=(adjacency.shape[0], adjacency.shape[1]))
+    BH_T = H_T.T.multiply(1.0/H_T.sum(axis=1).reshape(1, -1))
+    BH_T = BH_T.T
+    H = H_T.T
+    DH = H.T.multiply(1.0/H.sum(axis=1).reshape(1, -1))
+    DH = DH.T
+    DHBH_T = np.dot(DH,BH_T)
+    adjacency = DHBH_T.tocoo()
+    values = adjacency.data
+    indices = np.vstack((adjacency.row, adjacency.col))
+    i = torch.LongTensor(indices)
+    v = torch.FloatTensor(values)
+    shape = adjacency.shape
+    model.adjacency = torch.sparse.FloatTensor(i, v, torch.Size(shape))
+    '''
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
     for i in slices:
         model.zero_grad()
@@ -482,5 +545,20 @@ def train_test(model, train_data, test_data, epoch):
                 else:
                     metrics['mrr%d' % K].append(1 / (np.where(prediction == target)[0][0] + 1))
     return metrics, total_loss
+
+def sim(embedding, e_embeddings, hyperedge_emb, a):
+    e_embeddings = trans_to_cuda(torch.stack(e_embeddings))
+    hyperedge_emb = trans_to_cuda(torch.FloatTensor(hyperedge_emb))
+    sim_up = torch.cat((embedding, hyperedge_emb), 0).reshape(200,1)
+    sim_up = torch.mm(a.T, sim_up)
+    sim_up = torch.exp(torch.sigmoid(sim_up))
+    down_temp = torch.cat((embedding.reshape(100,1).repeat(1, len(e_embeddings)), e_embeddings.T), 0)
+    down_temp = torch.mm(a.T, down_temp)
+    sim_down = torch.exp(torch.sigmoid(down_temp.reshape(down_temp.shape[1])))
+    #print(embedding(ind).reshape(100,1).repeat(1, len(indice)))
+    #print(embedding(trans_to_cuda(torch.Tensor(indice).long())).T)
+    
+    score = sim_up/sum(sim_down)
+    return score.item()
 
 
