@@ -28,6 +28,10 @@ parser.add_argument('--heads', type=int, default=1)
 parser.add_argument('--drop_rate', type=float, default=0.7, help='CL dropout rate.')
 parser.add_argument('--alpha', type=float, default=0.)
 parser.add_argument('--adj_type', nargs='?', default='si',help='Specify the type of the adjacency (laplacian) matrix from {bi, si}.')
+parser.add_argument('--batch_size_cl', type=int, default=8192, help='CL batch size.')
+parser.add_argument('--cl_alpha', type=float, default=1.)
+parser.add_argument('--temperature', type=float, default=0.7, help='Softmax temperature.')
+
 
 opt = parser.parse_args()
 print(opt)
@@ -42,7 +46,8 @@ def main():
         n_node = 43097
     elif opt.dataset == 'Tmall':
         #n_node = 40727
-        #n_node = 41512 這是不包括知識圖譜的
+        n_item = 41512
+        #n_item = max(max(max(train_data[0])), max(max(test_data[0])))
         n_node = 50840
     elif opt.dataset == 'retailrocket':
         n_node = 36968
@@ -52,13 +57,21 @@ def main():
         n_node = 142569 #已經有加KG裡的entity數
     else:
         n_node = 309
-    train_data = Data(train_data,all_train,opt, shuffle=True, n_node=n_node, KG=True, kg_batch_size=opt.kg_batch_size)
-    test_data = Data(test_data,all_train,opt, shuffle=True, n_node=n_node, KG=False)
-    
+    train_data = Data(train_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=True)
+    test_data = Data(test_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=False)
+    ret_num = train_data.n_session + train_data.n_items
     ##新加的
     weight_size = eval(opt.layer_size)
     num_layers = len(weight_size) - 2
     heads = [opt.heads] * num_layers + [1]
+
+    adjM = train_data.lap_list
+
+    print(len(adjM.nonzero()[0]))
+    g = dgl.DGLGraph(adjM)
+    g = dgl.remove_self_loop(g)
+    g = dgl.add_self_loop(g)
+    g = g.to('cuda')
 
     edge2type = {}
     for i,mat in enumerate(train_data.kg_lap_list):
@@ -89,7 +102,7 @@ def main():
     #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,raw=train_data.raw,itemTOsess = train_data.itemTOsess, n_node=n_node,n_relations=train_data.n_relations,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
     
     #有KG
-    model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,n_relations=train_data.n_relations,opt=opt,num_layers=num_layers, num_hidden=weight_size[-2], num_classes=weight_size[-1],  heads=heads, activation=F.elu, feat_drop=0.1, attn_drop=0., negative_slope=0.01, residual=False,emb_size=opt.embSize, relation_embSize=opt.relation_embSize))
+    model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,n_relations=train_data.n_relations,opt=opt,num_layers=num_layers, num_hidden=weight_size[-2], num_classes=weight_size[-1],  heads=heads, activation=F.elu, feat_drop=0.1, attn_drop=0., negative_slope=0.01, residual=False,emb_size=opt.embSize, relation_embSize=opt.relation_embSize, ret_num=ret_num))
     
     #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
     top_K = [5, 10, 20]
@@ -101,7 +114,7 @@ def main():
     for epoch in range(opt.epoch):
         print('-------------------------------------------------------')
         print('epoch: ', epoch)
-        metrics, total_loss = train_test(model, train_data, test_data, kg, epoch, opt.drop_rate)
+        metrics, total_loss = train_test(model, train_data, test_data, kg, g, epoch, opt.drop_rate)
         for K in top_K:
             metrics['hit%d' % K] = np.mean(metrics['hit%d' % K]) * 100
             metrics['mrr%d' % K] = np.mean(metrics['mrr%d' % K]) * 100

@@ -38,18 +38,26 @@ import torch
 #這邊的n_node有算進KG的entity數
 
 def data_masks(all_sessions, n_node):
+    item_dict = dict()
+    inter_mat = list()
+
     indptr, indices, data = [], [], []
     indptr.append(0)
-    for j in range(len(all_sessions)):
+    n_session = len(all_sessions)
+    for j in range(n_session):
         session = np.unique(all_sessions[j])
         length = len(session)
         s = indptr[-1]
         indptr.append((s + length))
         for i in range(length):
+            inter_mat.append([j, session[i]])
+            if session[i] not in item_dict.keys():
+                item_dict[session[i]] = []
+            item_dict[session[i]].append(j)
             indices.append(session[i]-1)
             data.append(1)
-    matrix = csr_matrix((data, indices, indptr), shape=(len(all_sessions), n_node))
-    return matrix
+    matrix = csr_matrix((data, indices, indptr), shape=(n_session, n_node))
+    return matrix, n_session, item_dict, np.array(inter_mat)
 
 '''
 def data_masks(all_sessions, n_node):
@@ -69,10 +77,10 @@ def data_masks(all_sessions, n_node):
     return matrix, itemTOsess
 '''
 class Data():
-    def __init__(self, data, all_train, opt, shuffle=False, n_node=None, KG=False, kg_batch_size=100):
+    def __init__(self, data, all_train, opt, shuffle=False, n_item=None, n_node=None, KG=False):
         self.raw = np.asarray(data[0])
         
-        H_T = data_masks(self.raw, n_node)
+        H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_node)
         BH_T = H_T.T.multiply(1.0/H_T.sum(axis=1).reshape(1, -1))
         BH_T = BH_T.T
         H = H_T.T
@@ -80,19 +88,23 @@ class Data():
         DH = DH.T
         DHBH_T = np.dot(DH,BH_T)
         self.adjacency = DHBH_T.tocoo()
-        
         #self.adjacency, self.itemTOsess = data_masks(self.raw, n_node)
         '''adj = data_masks(all_train, n_node)
         # # print(adj.sum(axis=0))
         self.adjacency = adj.multiply(1.0/adj.sum(axis=0).reshape(1, -1))'''
         self.n_node = n_node
+        self.n_items = n_item
         self.targets = np.asarray(data[1])
         self.length = len(self.raw)
         self.shuffle = shuffle
         self.adj_type = opt.adj_type
-        
+        self.exist_items = self.item_dict.keys()
+        self.adj_list= self._get_cf_adj_list()
+        self.lap_list = self._get_lap_list()
+
         if KG:
-            self.kg_batch_size = kg_batch_size
+            self.kg_batch_size = opt.kg_batch_size
+            self.cl_batch_size = opt.batch_size_cl
             kg_data = self.load_kg('../datasets/Tmall/kg.txt')
             print(time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime()), '-- kg data load --')
             self.construct_data(kg_data)
@@ -124,8 +136,8 @@ class Data():
         return matrix, degree
 
     def generate_batch(self, batch_size):
+        shuffled_arg = np.arange(self.length)
         if self.shuffle:
-            shuffled_arg = np.arange(self.length)
             np.random.shuffle(shuffled_arg)
             self.raw = self.raw[shuffled_arg]
             self.targets = self.targets[shuffled_arg]
@@ -134,7 +146,7 @@ class Data():
             n_batch += 1
         slices = np.split(np.arange(n_batch * batch_size), n_batch)
         slices[-1] = np.arange(self.length-batch_size, self.length)
-        return slices
+        return slices, shuffled_arg[slices]
 
     def get_slice(self, index):
         items, num_node = [], []
@@ -337,3 +349,48 @@ class Data():
             for head, tail in self.relation_dict[relation]:
                 all_kg_dict[head].append((tail, relation))
         return all_kg_dict
+    
+    def _generate_train_cl_batch(self):
+        if self.cl_batch_size <= len(self.exist_items):
+            items = random.sample(self.exist_items, self.cl_batch_size)
+        else:
+            items_list = list(self.exist_items)
+            items = [random.choice(items_list) for _ in range(self.cl_batch_size)]
+        return items
+
+    def generate_train_cl_batch(self):
+        items = self._generate_train_cl_batch()
+        batch_data = {}
+        batch_data['items'] = items
+        return batch_data
+    
+    def _get_cf_adj_list(self, is_subgraph = False, dropout_rate = None):
+        def _np_mat2sp_adj(np_mat, row_pre, col_pre):
+            n_all = self.n_session + self.n_items
+            # single-direction
+            a_rows = np_mat[:, 0] + row_pre
+            a_cols = np_mat[:, 1] + col_pre -1
+            if is_subgraph is True:
+                subgraph_idx = np.arange(len(a_rows))
+                subgraph_id = np.random.choice(subgraph_idx, size = int(dropout_rate * len(a_rows)), replace = False)
+                a_rows = a_rows[subgraph_id]
+                a_cols = a_cols[subgraph_id]
+                
+            vals = [1.] * len(a_rows) * 2
+            rows = np.concatenate((a_rows, a_cols))
+            cols = np.concatenate((a_cols, a_rows))
+            adj = coo_matrix((vals, (rows, cols)), shape=(n_all, n_all))
+            return adj
+        R = _np_mat2sp_adj(self.cf_data, row_pre=0, col_pre=self.n_session)
+        return R
+    
+    def _get_lap_list(self, is_subgraph = False, subgraph_adj = None):
+        if is_subgraph is True:
+            adj = subgraph_adj
+        else:
+            adj = self.adj_list
+        if self.adj_type == 'bi':
+            lap_list = self._bi_norm_lap(adj)
+        else:
+            lap_list = self._si_norm_lap(adj)
+        return lap_list

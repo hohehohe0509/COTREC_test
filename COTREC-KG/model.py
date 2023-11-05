@@ -124,7 +124,7 @@ class SessConv(Module):
 
 class COTREC(Module):
     def __init__(self, adjacency, n_node, opt, num_layers, num_hidden, num_classes,
-                 heads, activation, feat_drop, attn_drop, negative_slope, residual, n_relations=0, emb_size=100, relation_embSize=100):
+                 heads, activation, feat_drop, attn_drop, negative_slope, residual, ret_num, n_relations=0, emb_size=100, relation_embSize=100):
         super(COTREC, self).__init__()
         self.emb_size = emb_size
         self.batch_size = opt.batchSize
@@ -143,14 +143,18 @@ class COTREC(Module):
         self.K = 10
         self.w_k = 10
         self.num = 5000
+        self.cl_alpha = opt.cl_alpha
 
         self.kg_gat_layers = nn.ModuleList()
+        self.sub_gat_layers = nn.ModuleList()
         self.drop_learner = False
         self.activation = activation
         self.alpha=opt.alpha
         self.epsilon = torch.FloatTensor([1e-12]).cuda()
         self.kg_edge_weight = None
         self.num_layers = num_layers
+        tau = opt.temperature
+        cl_dim = self.emb_size
         #self.raw = raw
         #self.itemTOsess = itemTOsess
 
@@ -174,7 +178,9 @@ class COTREC(Module):
         #self.adjacency_init = adjacency
         self.adjacency = adjacency
         #self.embedding = nn.Embedding(self.n_node, self.emb_size)
+        self.ret_num = ret_num
         self.embedding = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
+        self.cl_embed = nn.Parameter(torch.zeros((self.ret_num, self.kg_embSize)))
         self.kg_embedding = nn.Parameter(torch.zeros((self.n_node, self.kg_embSize)))
         #每個資料集的長度不一樣
         self.pos_len = 200
@@ -212,6 +218,21 @@ class COTREC(Module):
         # self.adv_item = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         # self.adv_sess = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         
+        # input projection (no residual)
+        self.sub_gat_layers.append(myGATConv(self.kg_embSize, num_hidden, heads[0],
+            feat_drop, attn_drop, negative_slope, False, self.activation, bias=True, alpha=self.alpha))
+        # hidden layers
+        for l in range(1, num_layers):
+            # due to multi-head, the in_dim = num_hidden * num_heads
+            self.sub_gat_layers.append(myGATConv(num_hidden * heads[l-1],
+                 num_hidden, heads[l],
+                feat_drop, attn_drop, negative_slope, residual, self.activation, bias=True, alpha=self.alpha))
+        # output projection
+        self.sub_gat_layers.append(myGATConv(num_hidden * heads[-2],
+             num_classes, heads[-1],
+            feat_drop, attn_drop, negative_slope, residual, None, bias=True, alpha=self.alpha))
+
+
         self.kg_gat_layers.append(myGATConv(self.kg_embSize, num_hidden, heads[0],
             feat_drop, attn_drop, negative_slope, False, self.activation, bias=True, alpha=self.alpha))
         # hidden layers
@@ -224,8 +245,11 @@ class COTREC(Module):
         self.kg_gat_layers.append(myGATConv(num_hidden * heads[-2],
              num_classes, heads[-1],
             feat_drop, attn_drop, negative_slope, residual, None, bias=True, alpha=self.alpha))
+        
+        self.learner1 = DropLearner(self.kg_embSize, self.kg_embSize)
         self.learner2 = DropLearner(self.kg_embSize, self.kg_embSize, self.kg_embSize)
         
+        self.contrast = Contrast_2view(self.emb_size, self.kg_embSize + 48, cl_dim, tau, opt.batch_size_cl)
         self.loss_function = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         self.init_parameters()
@@ -394,6 +418,34 @@ class COTREC(Module):
         loss = kg_loss + self.kg_l2loss_lambda * l2_loss
         return loss'''
     
+    def calc_cl_emb(self, g, drop_learn = False):
+        all_embed = []
+        h = self.cl_embed
+        tmp = (h / (torch.max(torch.norm(h, dim=1, keepdim=True),self.epsilon)))
+        edge_weight = None
+        reg = 0
+        if drop_learn:
+            reg, edge_weight = self.learner1(tmp, g, temperature = 0.7)
+            self.cf_edge_weight = edge_weight.detach()
+        else:
+            edge_weight = self.cf_edge_weight
+        all_embed.append(tmp)
+        res_attn = None
+        for l in range(self.num_layers):
+            h, res_attn = self.sub_gat_layers[l](g, h, res_attn=res_attn, edge_weight = edge_weight)
+            h = h.flatten(1)
+            tmp = (h / (torch.max(torch.norm(h, dim=1, keepdim=True),self.epsilon)))
+            all_embed.append(tmp)
+        # output projection
+        logits, _ = self.sub_gat_layers[-1](g, h, res_attn=res_attn, edge_weight = edge_weight)
+        logits = logits.mean(1)
+        all_embed.append(logits / (torch.max(torch.norm(logits, dim=1, keepdim=True),self.epsilon)))
+        all_embed = torch.cat(all_embed, 1)
+        if drop_learn:
+            return all_embed, reg
+        else:
+            return all_embed
+
     def calc_kg_emb(self, g, drop_learn = False):
         all_embed = []
         h = self.kg_embedding
@@ -458,9 +510,25 @@ class COTREC(Module):
         base_loss = (aug_edge_weight * F.softplus(-neg_score + pos_score)).mean()
         return base_loss
 
-    def train_loss(self, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg):
+    def calc_cl_loss(self, kg, item):
+        embedding = self.embedding
+        #kg_embedding = self.calc_kg_emb(kg, e_feat)
+        kg_embedding = self.calc_kg_emb(kg)
+
+        zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
+        embedding = torch.cat([zeros, embedding], 0)
+        kg_embedding = torch.cat([zeros, kg_embedding], 0)
+
+        kg_emb = kg_embedding[item]
+        cf_emb = embedding[item]
+        cl_loss = self.contrast(cf_emb, kg_emb)
+        loss = self.cl_alpha*cl_loss
+        return loss
+
+    def train_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg, reg_kg = self.calc_kg_emb(kg, True)
+        item_embedding_cf, reg_cf = self.calc_cl_emb(g, True)
         #item_embeddings_kg = self.calc_kg_emb(kg, False)
 
         if self.dataset == 'Tmall':
@@ -482,7 +550,8 @@ class COTREC(Module):
         scores_item = torch.mm(session_embedding_all, torch.transpose(item_embeddings_all, 1, 0))
         loss_item = self.loss_function(scores_item, tar)
 
-        sess_emb_s = self.SessGraph(self.embedding, D, A, session_item, session_len)
+        sess_emb_s = item_embedding_cf[sessionID]
+        #sess_emb_s = self.SessGraph(self.embedding, D, A, session_item, session_len)
         scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embeddings_i, 1, 0))
         # compute probability of items to be positive examples
         pos_prob_I = self.example_predicting(item_embeddings_i, sess_emb_i)
@@ -497,7 +566,7 @@ class COTREC(Module):
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
         last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
-
+        '''
         # compute and update adversarial examples
         self.adversarial_item(item_embeddings_i, tar, sess_emb_i)
         self.adversarial_sess(item_embeddings_i, tar, sess_emb_s)
@@ -512,8 +581,10 @@ class COTREC(Module):
         #41512是只有item沒有entity
         #return self.beta * con_loss, loss_item, scores_item[:41512], loss_diff*self.lam
         return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
+        '''
+        return self.beta * con_loss, loss_item, scores_item
 
-    def test_loss(self, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg):
+    def test_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
         self.kg_edge_weight = None
 
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
@@ -538,19 +609,23 @@ class COTREC(Module):
         loss_item = self.loss_function(scores_item, tar)
         loss_diff = 0
         con_loss = 0
-        return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
+        #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
+        return self.beta * con_loss, loss_item, scores_item
     
     def forward(self, mode, *input):
         if mode == 'train_kg':
             return self.calc_kg_loss(*input)
         if mode == 'train':
             return self.train_loss(*input)
+        if mode == 'cl':
+            return self.calc_cl_loss(*input)
         if mode == 'test':
             return self.test_loss(*input)
 
 
-def forward(model, i, data, kg, epoch, mode):
+def forward(model, i, sessionID, data, kg, g, epoch, mode):
     tar, session_len, session_item, reversed_sess_item, mask, diff_mask = data.get_slice(i)
+    sessionID = trans_to_cuda(torch.Tensor(sessionID).long())
     diff_mask = trans_to_cuda(torch.Tensor(diff_mask).long())
     A_hat, D_hat = data.get_overlap(session_item)
     session_item = trans_to_cuda(torch.Tensor(session_item).long())
@@ -560,8 +635,10 @@ def forward(model, i, data, kg, epoch, mode):
     tar = trans_to_cuda(torch.Tensor(tar).long())
     mask = trans_to_cuda(torch.Tensor(mask).long())
     reversed_sess_item = trans_to_cuda(torch.Tensor(reversed_sess_item).long())
-    con_loss, loss_item, scores_item, loss_diff = model(mode, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg)
-    return tar, scores_item, con_loss, loss_item, loss_diff
+    #con_loss, loss_item, scores_item, loss_diff = model(mode, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
+    #return tar, scores_item, con_loss, loss_item, loss_diff
+    con_loss, loss_item, scores_item = model(mode, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
+    return tar, scores_item, con_loss, loss_item
 
 
 @jit(nopython=True)
@@ -578,16 +655,25 @@ def find_k_largest(K, candidates):
     # k_largest_scores = [item[0] for item in n_candidates]
     return ids#, k_largest_scores
 
-def train_test(model, train_data, test_data, kg, epoch, drop_rate):
+def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
     print('start training: ', datetime.datetime.now())
     total_loss = 0.0
-    slices = train_data.generate_batch(model.batch_size)
+    slices, sessionID = train_data.generate_batch(model.batch_size)
     
     time1 = time()
     kg_total_loss = 0
+    cl_total_loss = 0
     n_kg_batch = train_data.n_kg_data // train_data.kg_batch_size + 1
+    n_cl_batch = train_data.n_items // train_data.cl_batch_size + 1
 
     dropout_rate = drop_rate
+
+    sub_cf_adjM = train_data._get_cf_adj_list(is_subgraph = True, dropout_rate = dropout_rate)
+    sub_cf_lap = train_data._get_lap_list(is_subgraph = True, subgraph_adj = sub_cf_adjM)
+    sub_cf_g = dgl.DGLGraph(sub_cf_lap)
+    sub_cf_g = dgl.add_self_loop(sub_cf_g)
+    sub_cf_g = sub_cf_g.to('cuda')
+
     sub_kg_adjM, _ = train_data._get_kg_adj_list(is_subgraph = True, dropout_rate = dropout_rate)
     sub_kg_lap = sum(train_data._get_kg_lap_list(is_subgraph = True, subgraph_adj = sub_kg_adjM))
     sub_kg = dgl.DGLGraph(sub_kg_lap)
@@ -614,29 +700,30 @@ def train_test(model, train_data, test_data, kg, epoch, drop_rate):
         kg_total_loss += kge_loss.item()
     print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
     
-    '''for iter in range(1, n_kg_batch + 1):
-        model.zero_grad()
-        time2 = time()
-        kg_batch_head, kg_batch_relation, kg_batch_pos_tail, kg_batch_neg_tail = train_data.generate_kg_batch(train_data.kg_dict)
-        kg_batch_head = trans_to_cuda(kg_batch_head)
-        kg_batch_relation = trans_to_cuda(kg_batch_relation)
-        kg_batch_pos_tail = trans_to_cuda(kg_batch_pos_tail)
-        kg_batch_neg_tail = trans_to_cuda(kg_batch_neg_tail)
-        kg_batch_loss = model('train_kg', kg_batch_head, kg_batch_relation, kg_batch_pos_tail, kg_batch_neg_tail)
-        kg_batch_loss.backward()
-        model.optimizer.step()
-        kg_total_loss += kg_batch_loss.item()
-    print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
-    '''
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
-    for i in slices:
+    for i in range(len(slices)):
         model.zero_grad()
-        tar, scores_item, con_loss, loss_item, loss_diff = forward(model, i, train_data, sub_kg, epoch, mode='train')
-        loss = loss_item + con_loss + loss_diff
+        #tar, scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
+        #loss = loss_item + con_loss + loss_diff
+        tar, scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
+        loss = loss_item + con_loss
         loss.backward()
         model.optimizer.step()
         total_loss += loss.item()
     print('\tLoss:\t%.3f' % total_loss)
+    
+    '''time2 = time()
+    for idx in range(n_cl_batch):
+        model.zero_grad()
+        batch_data = train_data.generate_train_cl_batch()
+        cl_loss = model("cl", sub_kg, batch_data['items'])
+
+        cl_loss.backward()
+        model.optimizer.step()
+        cl_total_loss += cl_loss.item()
+    print('CL Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_cl_batch, time() - time2, kg_total_loss / n_cl_batch))
+    '''
+
     top_K = [5, 10, 20]
     metrics = {}
     for K in top_K:
@@ -645,9 +732,10 @@ def train_test(model, train_data, test_data, kg, epoch, drop_rate):
     print('start predicting: ', datetime.datetime.now())
 
     model.eval()
-    slices = test_data.generate_batch(model.batch_size)
-    for i in slices:
-        tar,scores_item, con_loss, loss_item, loss_diff = forward(model, i, test_data, kg, epoch, mode='test')
+    slices, sessionID = test_data.generate_batch(model.batch_size)
+    for i in range(len(slices)):
+        #tar,scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], test_data, kg, g, epoch, mode='test')
+        tar,scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], test_data, kg, g, epoch, mode='test')
         scores = trans_to_cpu(scores_item).detach().numpy()
         index = []
         for idd in range(model.batch_size):
@@ -663,19 +751,5 @@ def train_test(model, train_data, test_data, kg, epoch, drop_rate):
                     metrics['mrr%d' % K].append(1 / (np.where(prediction == target)[0][0] + 1))
     return metrics, total_loss
 
-def sim(embedding, e_embeddings, hyperedge_emb, a):
-    e_embeddings = trans_to_cuda(torch.stack(e_embeddings))
-    hyperedge_emb = trans_to_cuda(torch.FloatTensor(hyperedge_emb))
-    sim_up = torch.cat((embedding, hyperedge_emb), 0).reshape(200,1)
-    sim_up = torch.mm(a.T, sim_up)
-    sim_up = torch.exp(torch.sigmoid(sim_up))
-    down_temp = torch.cat((embedding.reshape(100,1).repeat(1, len(e_embeddings)), e_embeddings.T), 0)
-    down_temp = torch.mm(a.T, down_temp)
-    sim_down = torch.exp(torch.sigmoid(down_temp.reshape(down_temp.shape[1])))
-    #print(embedding(ind).reshape(100,1).repeat(1, len(indice)))
-    #print(embedding(trans_to_cuda(torch.Tensor(indice).long())).T)
-    
-    score = sim_up/sum(sim_down)
-    return score.item()
 
 
