@@ -80,7 +80,7 @@ class Data():
     def __init__(self, data, all_train, opt, shuffle=False, n_item=None, n_node=None, KG=False):
         self.raw = np.asarray(data[0])
         
-        H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_node)
+        H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_item)
         BH_T = H_T.T.multiply(1.0/H_T.sum(axis=1).reshape(1, -1))
         BH_T = BH_T.T
         H = H_T.T
@@ -176,7 +176,7 @@ class Data():
         # index_list = [item_set.index(a) for a in self.targets[index]-1]
 
         #我猜這個100是指batchSize
-        diff_mask = np.ones(shape=[100, self.n_node]) * (1/(self.n_node - 1))
+        diff_mask = np.ones(shape=[100, self.n_items]) * (1/(self.n_items - 1))
 
         #因為target的ID不是從0開始，所以需要減1
         for count, value in enumerate(self.targets[index]-1):
