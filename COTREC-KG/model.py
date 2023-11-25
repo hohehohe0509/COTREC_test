@@ -180,7 +180,7 @@ class COTREC(Module):
         self.adjacency = adjacency
         #self.embedding = nn.Embedding(self.n_node, self.emb_size)
         self.ret_num = ret_num
-        self.embedding = nn.Parameter(torch.zeros((self.n_item, self.emb_size)))
+        self.embedding = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
         self.cl_embed = nn.Parameter(torch.zeros((self.ret_num, self.kg_embSize)))
         self.kg_embedding = nn.Parameter(torch.zeros((self.n_node, self.kg_embSize)))
         #每個資料集的長度不一樣
@@ -214,8 +214,8 @@ class COTREC(Module):
         #用在注意力層
         self.a = nn.Parameter(torch.Tensor(2 * self.emb_size, 1))
 
-        self.adv_item = torch.cuda.FloatTensor(self.n_item, self.emb_size).fill_(0).requires_grad_(True)
-        self.adv_sess = torch.cuda.FloatTensor(self.n_item, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_item = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_sess = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
         # self.adv_item = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         # self.adv_sess = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         
@@ -281,7 +281,7 @@ class COTREC(Module):
         hs = torch.div(torch.sum(seq_h, 1), session_len)
         mask = mask.float().unsqueeze(-1)
         len = seq_h.shape[1]
-        pos_emb = self.pos_embedding[:len]
+        pos_emb = self.pos_embedding.weight[:len]
         pos_emb = pos_emb.unsqueeze(0).repeat(self.batch_size, 1, 1)
 
         hs = hs.unsqueeze(-2).repeat(1, len, 1)
@@ -359,8 +359,8 @@ class COTREC(Module):
 
     def SSL_topk(self, anchor, sess_emb, pos, neg):
         def score(x1, x2):
-            return F.cosine_similarity(x1, x2, dim=2)
-        
+            return torch.sum(torch.mul(x1, x2), 2)
+
         anchor = F.normalize(anchor + sess_emb, p=2, dim=-1)
         pos = torch.reshape(pos, (self.batch_size, self.K, self.emb_size)) + sess_emb.unsqueeze(1).repeat(1, self.K, 1)
         neg = torch.reshape(neg, (self.batch_size, self.K, self.emb_size)) + sess_emb.unsqueeze(1).repeat(1, self.K, 1)
@@ -526,15 +526,15 @@ class COTREC(Module):
         loss = self.cl_alpha*cl_loss
         return loss
 
-    def train_loss(self, data, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
+    def train_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg, reg_kg = self.calc_kg_emb(kg, True)
-        node_embedding_cf, reg_cf = self.calc_cl_emb(g, True)
-        item_embedding_cf = node_embedding_cf[data.n_session:,:]
+        item_embedding_cf, reg_cf = self.calc_cl_emb(g, True)
+        #item_embedding_cf = node_embedding_cf[data.n_session:,:]
         #item_embeddings_kg = self.calc_kg_emb(kg, False)
 
-        #if self.dataset == 'Tmall':
-        if self.dataset == '':
+        if self.dataset == 'Tmall':
+        #if self.dataset == '':
             # for Tmall dataset, we do not use position embedding to learn temporal order
             sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
             sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
@@ -548,54 +548,52 @@ class COTREC(Module):
         item_embeddings_kg = F.normalize(item_embeddings_kg, dim=-1, p=2)
         
         session_embedding_all = torch.cat([sess_emb_i, sess_emb_kg], 1)
-        item_embeddings_all = torch.cat([item_embeddings_i, item_embeddings_kg[:data.n_items,:]], 1)
+        item_embeddings_all = torch.cat([item_embeddings_i, item_embeddings_kg], 1)
         scores_item = torch.mm(session_embedding_all, torch.transpose(item_embeddings_all, 1, 0))
-        loss_item = self.loss_function(scores_item, tar)
+        loss_item = self.loss_function(scores_item[:41512], tar)
 
-        sess_emb_s = node_embedding_cf[sessionID]
+        sess_emb_s = item_embedding_cf[sessionID]
         #sess_emb_s = self.SessGraph(self.embedding, D, A, session_item, session_len)
-        #scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embeddings_i, 1, 0))
-        scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embedding_cf, 1, 0))
+        scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embeddings_i, 1, 0))
+        #scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embedding_cf, 1, 0))
         # compute probability of items to be positive examples
         pos_prob_I = self.example_predicting(item_embeddings_i, sess_emb_i)
-        pos_prob_S = self.example_predicting(item_embedding_cf, sess_emb_s)
-        #pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
+        pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
 
         # choose top-10 items as positive samples and randomly choose 10 items as negative and get their embedding
-        pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i[:data.n_items,:], item_embedding_cf)
-        #pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
+        pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
 
         last_item = torch.squeeze(reversed_sess_item[:, 0])
         last_item = last_item - 1
         last = item_embeddings_i.index_select(0, last_item)
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
-        last = item_embedding_cf[last_item]
+        last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
-        
+        '''
         # compute and update adversarial examples
-        '''self.adversarial_item(item_embeddings_i, tar, sess_emb_i)
-        self.adversarial_sess(self.embedding, tar, sess_emb_s)
+        self.adversarial_item(item_embeddings_i, tar, sess_emb_i)
+        self.adversarial_sess(item_embeddings_i, tar, sess_emb_s)
 
         adv_emb_item = item_embeddings_i + self.adv_item
-        adv_emb_sess = self.embedding + self.adv_sess
+        adv_emb_sess = item_embeddings_i + self.adv_sess
 
         score_adv1 = torch.mm(sess_emb_s, torch.transpose(adv_emb_item, 1, 0))
         score_adv2 = torch.mm(sess_emb_i, torch.transpose(adv_emb_sess, 1, 0))
         # add difference constraint
         loss_diff = self.diff(scores_item, scores_sess, score_adv2, score_adv1, diff_mask)
+        #41512是只有item沒有entity
+        #return self.beta * con_loss, loss_item, scores_item[:41512], loss_diff*self.lam
+        return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
         '''
-        #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
-        
         return self.beta * con_loss, loss_item, scores_item
-        
 
-    def test_loss(self, data, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
+    def test_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
         self.kg_edge_weight = None
 
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg = self.calc_kg_emb(kg)
-        #if self.dataset == 'Tmall':
-        if self.dataset == '':
+        if self.dataset == 'Tmall':
+        #if self.dataset == '':
             sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
             sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
         else:
@@ -608,10 +606,10 @@ class COTREC(Module):
         item_embeddings_kg = F.normalize(item_embeddings_kg, dim=-1, p=2)
         #scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i[:41512], 1, 0))
         session_embedding_all = torch.cat([sess_emb_i, sess_emb_kg], 1)
-        item_embeddings_all = torch.cat([item_embeddings_i, item_embeddings_kg[:self.n_item,:]], 1)
+        item_embeddings_all = torch.cat([item_embeddings_i, item_embeddings_kg], 1)
         scores_item = torch.mm(session_embedding_all, torch.transpose(item_embeddings_all, 1, 0))
         #scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i[:41512], 1, 0))
-        loss_item = self.loss_function(scores_item, tar)
+        loss_item = self.loss_function(scores_item[:41512], tar)
         loss_diff = 0
         con_loss = 0
         #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
@@ -640,9 +638,9 @@ def forward(model, i, sessionID, data, kg, g, epoch, mode):
     tar = trans_to_cuda(torch.Tensor(tar).long())
     mask = trans_to_cuda(torch.Tensor(mask).long())
     reversed_sess_item = trans_to_cuda(torch.Tensor(reversed_sess_item).long())
-    #con_loss, loss_item, scores_item, loss_diff = model(mode, data, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
+    #con_loss, loss_item, scores_item, loss_diff = model(mode, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
     #return tar, scores_item, con_loss, loss_item, loss_diff
-    con_loss, loss_item, scores_item = model(mode, data, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
+    con_loss, loss_item, scores_item = model(mode, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
     return tar, scores_item, con_loss, loss_item
 
 
@@ -705,17 +703,6 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
         kg_total_loss += kge_loss.item()
     print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
     
-    time2 = time()
-    for idx in range(n_cl_batch):
-        model.zero_grad()
-        batch_data = train_data.generate_train_cl_batch()
-        cl_loss = model("cl", sub_kg, batch_data['items'])
-
-        cl_loss.backward()
-        model.optimizer.step()
-        cl_total_loss += cl_loss.item()
-    print('CL Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_cl_batch, time() - time2, kg_total_loss / n_cl_batch))
-
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
     for i in range(len(slices)):
         model.zero_grad()
@@ -727,6 +714,18 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
         model.optimizer.step()
         total_loss += loss.item()
     print('\tLoss:\t%.3f' % total_loss)
+    
+    '''time2 = time()
+    for idx in range(n_cl_batch):
+        model.zero_grad()
+        batch_data = train_data.generate_train_cl_batch()
+        cl_loss = model("cl", sub_kg, batch_data['items'])
+
+        cl_loss.backward()
+        model.optimizer.step()
+        cl_total_loss += cl_loss.item()
+    print('CL Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_cl_batch, time() - time2, kg_total_loss / n_cl_batch))
+    '''
 
     top_K = [5, 10, 20]
     metrics = {}
