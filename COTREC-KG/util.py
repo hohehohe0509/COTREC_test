@@ -79,9 +79,8 @@ def data_masks(all_sessions, n_node):
 class Data():
     def __init__(self, data, all_train, opt, shuffle=False, n_item=None, n_node=None, KG=False):
         self.raw = np.asarray(data[0])
-
-        H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_node)
-        #H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_item)
+        
+        H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_item)
         BH_T = H_T.T.multiply(1.0/H_T.sum(axis=1).reshape(1, -1))
         BH_T = BH_T.T
         H = H_T.T
