@@ -180,7 +180,7 @@ class COTREC(Module):
         #self.embedding = nn.Embedding(self.n_node, self.emb_size)
         self.ret_num = ret_num
         self.embedding = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
-        #self.cl_embed = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
+        self.cl_embed = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
         self.kg_embedding = nn.Parameter(torch.zeros((self.n_node, self.kg_embSize)))
         #每個資料集的長度不一樣
         self.pos_len = 200
@@ -217,8 +217,8 @@ class COTREC(Module):
         #用在注意力層
         self.a = nn.Parameter(torch.Tensor(2 * self.emb_size, 1))
 
-        self.adv_item = torch.cuda.FloatTensor(self.n_item, self.emb_size).fill_(0).requires_grad_(True)
-        self.adv_sess = torch.cuda.FloatTensor(self.n_item, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_item = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_sess = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
         # self.adv_item = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         # self.adv_sess = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         
@@ -534,8 +534,8 @@ class COTREC(Module):
 
         seq_h = torch.cuda.FloatTensor(self.batch_size, self.emb_size).fill_(0)
         zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
-        #cl_embed = torch.cat([zeros, self.cl_embed], 0)
-        cl_embed = torch.cat([zeros, self.embedding], 0)
+        cl_embed = torch.cat([zeros, self.cl_embed], 0)
+        #cl_embed = torch.cat([zeros, self.embedding], 0)
         seq  = cl_embed[session_item]
 
         Q = torch.sigmoid(torch.matmul(seq,self.W_q))
@@ -592,27 +592,27 @@ class COTREC(Module):
         
         # compute probability of items to be positive examples
         pos_prob_I = self.example_predicting(item_embeddings_i, sess_emb_i)
-        #pos_prob_S = self.example_predicting(self.cl_embed, sess_emb_s)
-        pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
+        pos_prob_S = self.example_predicting(self.cl_embed, sess_emb_s)
+        #pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
 
         # choose top-10 items as positive samples and randomly choose 10 items as negative and get their embedding
-        #pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.cl_embed)
-        pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
+        pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.cl_embed)
+        #pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
 
         last_item = torch.squeeze(reversed_sess_item[:, 0])
         last_item = last_item - 1
         last = item_embeddings_i.index_select(0, last_item)
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
-        #last = self.cl_embed[last_item]
-        last = self.embedding[last_item]
+        last = self.cl_embed[last_item]
+        #last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
-        '''
+        
         # compute and update adversarial examples
         self.adversarial_item(item_embeddings_i, tar, sess_emb_i)
-        self.adversarial_sess(item_embeddings_i, tar, sess_emb_s)
+        self.adversarial_sess(self.cl_embed, tar, sess_emb_s)
 
         adv_emb_item = item_embeddings_i + self.adv_item
-        adv_emb_sess = item_embeddings_i + self.adv_sess
+        adv_emb_sess = self.cl_embed + self.adv_sess
 
         score_adv1 = torch.mm(sess_emb_s, torch.transpose(adv_emb_item, 1, 0))
         score_adv2 = torch.mm(sess_emb_i, torch.transpose(adv_emb_sess, 1, 0))
@@ -620,10 +620,10 @@ class COTREC(Module):
         # add difference constraint
         #loss_diff = self.diff(scores_item, scores_sess, score_adv2, score_adv1, diff_mask)
         loss_diff = self.diff(scores_item, scores_sess, score_adv1, score_adv2, diff_mask)
-        '''
-        #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
         
-        return self.beta * con_loss, loss_item, scores_item[:self.n_item]
+        return self.beta * con_loss, loss_item, scores_item[:self.n_item], loss_diff*self.lam
+        
+        #return self.beta * con_loss, loss_item, scores_item[:self.n_item]
         
 
     def test_loss(self, data, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
@@ -651,8 +651,8 @@ class COTREC(Module):
         loss_item = self.loss_function(scores_item[:self.n_item], tar)
         loss_diff = 0
         con_loss = 0
-        #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
-        return self.beta * con_loss, loss_item, scores_item[:self.n_item]
+        return self.beta * con_loss, loss_item, scores_item[:self.n_item], loss_diff*self.lam
+        #return self.beta * con_loss, loss_item, scores_item[:self.n_item]
     
     def forward(self, mode, *input):
         if mode == 'train_kg':
@@ -677,10 +677,10 @@ def forward(model, i, sessionID, data, kg, g, epoch, mode):
     tar = trans_to_cuda(torch.Tensor(tar).long())
     mask = trans_to_cuda(torch.Tensor(mask).long())
     reversed_sess_item = trans_to_cuda(torch.Tensor(reversed_sess_item).long())
-    #con_loss, loss_item, scores_item, loss_diff = model(mode, data, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
-    #return tar, scores_item, con_loss, loss_item, loss_diff
-    con_loss, loss_item, scores_item = model(mode, data, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
-    return tar, scores_item, con_loss, loss_item
+    con_loss, loss_item, scores_item, loss_diff = model(mode, data, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
+    return tar, scores_item, con_loss, loss_item, loss_diff
+    #con_loss, loss_item, scores_item = model(mode, data, sessionID, session_item, session_len, D_hat, A_hat, reversed_sess_item, mask, epoch,tar, diff_mask, kg, g)
+    #return tar, scores_item, con_loss, loss_item
 
 
 @jit(nopython=True)
@@ -745,10 +745,10 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
     for i in range(len(slices)):
         model.zero_grad()
-        #tar, scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
-        #loss = loss_item + con_loss + loss_diff
-        tar, scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
-        loss = loss_item + con_loss
+        tar, scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
+        loss = loss_item + con_loss + loss_diff
+        #tar, scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
+        #loss = loss_item + con_loss
         loss.backward()
         model.optimizer.step()
         total_loss += loss.item()
@@ -764,8 +764,8 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
     model.eval()
     slices, sessionID = test_data.generate_batch(model.batch_size)
     for i in range(len(slices)):
-        #tar,scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], test_data, kg, g, epoch, mode='test')
-        tar,scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], test_data, kg, g, epoch, mode='test')
+        tar,scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], test_data, kg, g, epoch, mode='test')
+        #tar,scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], test_data, kg, g, epoch, mode='test')
         scores = trans_to_cpu(scores_item).detach().numpy()
         index = []
         for idd in range(model.batch_size):

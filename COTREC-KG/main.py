@@ -9,7 +9,7 @@ import dgl
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=8, help='number of epochs to train for')
+parser.add_argument('--epoch', type=int, default=7, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
