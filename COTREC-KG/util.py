@@ -176,7 +176,7 @@ class Data():
         # index_list = [item_set.index(a) for a in self.targets[index]-1]
 
         #我猜這個100是指batchSize
-        diff_mask = np.ones(shape=[100, self.n_items]) * (1/(self.n_items - 1))
+        diff_mask = np.ones(shape=[100, self.n_node]) * (1/(self.n_node - 1))
 
         #因為target的ID不是從0開始，所以需要減1
         for count, value in enumerate(self.targets[index]-1):
