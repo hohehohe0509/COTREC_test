@@ -555,7 +555,8 @@ class COTREC(Module):
         for i in torch.arange(session_item.shape[0]):
             beta = F.softmax(get(i), 0)
             session_long = torch.matmul(beta,seq[i,:session_len[i]])
-            seq_h[i] = torch.matmul(self.W_init, torch.cat([session_long, seq[i,-1]], -1))
+            seq_h[i] = session_long
+            #seq_h[i] = torch.matmul(self.W_init, torch.cat([session_long, seq[i,-1]], -1))
         
         return seq_h
 
@@ -587,24 +588,24 @@ class COTREC(Module):
         loss_item = self.loss_function(scores_item[:self.n_item], tar)
 
         #sess_emb_s = self.SessGraph(self.embedding, D, A, session_item, session_len)
-        #scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embeddings_i, 1, 0))
-        scores_sess = torch.mm(sess_emb_s, torch.transpose(self.cl_embed, 1, 0))
+        scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embeddings_i, 1, 0))
+        #scores_sess = torch.mm(sess_emb_s, torch.transpose(self.cl_embed, 1, 0))
         
         # compute probability of items to be positive examples
         pos_prob_I = self.example_predicting(item_embeddings_i, sess_emb_i)
-        pos_prob_S = self.example_predicting(self.cl_embed, sess_emb_s)
-        #pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
+        #pos_prob_S = self.example_predicting(self.cl_embed, sess_emb_s)
+        pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
 
         # choose top-10 items as positive samples and randomly choose 10 items as negative and get their embedding
-        pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.cl_embed)
-        #pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
+        #pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.cl_embed)
+        pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
 
         last_item = torch.squeeze(reversed_sess_item[:, 0])
         last_item = last_item - 1
         last = item_embeddings_i.index_select(0, last_item)
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
-        last = self.cl_embed[last_item]
-        #last = self.embedding[last_item]
+        #last = self.cl_embed[last_item]
+        last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
         '''
         # compute and update adversarial examples
