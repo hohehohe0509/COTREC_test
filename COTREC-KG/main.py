@@ -9,12 +9,12 @@ import dgl
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=7, help='number of epochs to train for')
+parser.add_argument('--epoch', type=int, default=10, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
-parser.add_argument('--embSize', type=int, default=112, help='embedding size')
-parser.add_argument('--kg_embSize', type=int, default=64, help='embedding size')
-parser.add_argument('--relation_embSize', type=int, default=112, help='Relation Embedding size')
+parser.add_argument('--embSize', type=int, default=100, help='embedding size')
+parser.add_argument('--kg_embSize', type=int, default=52, help='embedding size')
+parser.add_argument('--relation_embSize', type=int, default=100, help='Relation Embedding size')
 parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
 parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5, help='Lambda when calculating KG l2 loss.')
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
@@ -31,6 +31,7 @@ parser.add_argument('--adj_type', nargs='?', default='si',help='Specify the type
 parser.add_argument('--batch_size_cl', type=int, default=8192, help='CL batch size.')
 parser.add_argument('--cl_alpha', type=float, default=1.)
 parser.add_argument('--temperature', type=float, default=0.7, help='Softmax temperature.')
+parser.add_argument('--num_attention_heads', type=int, default=5, help='Multi-Att heads')
 
 
 opt = parser.parse_args()
@@ -55,11 +56,11 @@ def main():
         n_node = 102569 #已經有加KG裡的entity數
     elif opt.dataset == 'ml-1m':
         n_node = 142569 #已經有加KG裡的entity數
-    else:
-        n_node = 309
+        
     train_data = Data(train_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=True)
     test_data = Data(test_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=False)
     ret_num = train_data.n_session + n_item
+    print(train_data.n_session)
     ##新加的
     weight_size = eval(opt.layer_size)
     num_layers = len(weight_size) - 2
@@ -129,7 +130,26 @@ def main():
             print('train_loss:\t%.4f\tRecall@%d: %.4f\tMRR%d: %.4f\tEpoch: %d,  %d' %
                   (total_loss, K, best_results['metric%d' % K][0], K, best_results['metric%d' % K][1],
                    best_results['epoch%d' % K][0], best_results['epoch%d' % K][1]))
+            
+    #     PATH = "./final_model/" + opt.dataset + "_model_epoch" + str(epoch) + ".pkl"
+    #     torch.save(model, PATH)
 
+        # # Load the model for testing
+    # PATH = "./final_model/" + opt.dataset + "_model_epoch2.pkl"
+    # model = torch.load(PATH)
+    # metrics = test(model, test_data, kg, g)
+        
+    # print('Result:')
+    # for K in top_K:
+    #     metrics['hit%d' % K] = np.mean(metrics['hit%d' % K]) * 100
+    #     metrics['mrr%d' % K] = np.mean(metrics['mrr%d' % K]) * 100
+    #     if best_results['metric%d' % K][0] < metrics['hit%d' % K]:
+    #         best_results['metric%d' % K][0] = metrics['hit%d' % K]
+    #     if best_results['metric%d' % K][1] < metrics['mrr%d' % K]:
+    #         best_results['metric%d' % K][1] = metrics['mrr%d' % K]
+    # for K in top_K:
+    #     print('Recall@%d: %.4f\tMRR%d: %.4f\t' %
+    #           (K, best_results['metric%d' % K][0], K, best_results['metric%d' % K][1]))
 
 if __name__ == '__main__':
     torch.manual_seed(2023)

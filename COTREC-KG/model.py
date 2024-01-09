@@ -13,6 +13,8 @@ from numba import jit
 import heapq
 import dgl
 from conv import myGATConv, DropLearner
+from entmax import entmax_bisect
+from tqdm import tqdm_notebook as tqdm
 
 def trans_to_cuda(variable):
     if torch.cuda.is_available():
@@ -29,6 +31,21 @@ def trans_to_cpu(variable):
 def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
+class LayerNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-12):
+        """Construct a layernorm module in the TF style (epsilon inside the square root).
+        """
+        super(LayerNorm, self).__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, x):
+        u = x.mean(-1, keepdim=True)
+        s = (x - u).pow(2).mean(-1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.variance_epsilon)
+        return self.weight * x + self.bias
+    
 class Contrast_2view(nn.Module):
     def __init__(self, cf_dim, kg_dim, hidden_dim, tau, cl_size):
         super(Contrast_2view, self).__init__()
@@ -75,7 +92,7 @@ class Contrast_2view(nn.Module):
             return self.sim(z1_proj, z2_proj)
 
 class HyperConv(Module):
-    def __init__(self, layers,dataset,emb_size=112):
+    def __init__(self, layers,dataset,emb_size=100):
         super(HyperConv, self).__init__()
         self.emb_size = emb_size
         self.layers = layers
@@ -91,8 +108,9 @@ class HyperConv(Module):
         item_embeddings = torch.sum(torch.stack(final),dim=0)/(self.layers+1)
         #item_embeddings = np.sum(final, 0) / (self.layers+1)
         return item_embeddings
+'''
 class SessConv(Module):
-    def __init__(self, layers, batch_size, emb_size=112):
+    def __init__(self, layers, batch_size, emb_size=100):
         super(SessConv, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
@@ -119,13 +137,109 @@ class SessConv(Module):
         sess = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in session])))
         session_emb = torch.sum(sess, 0)/(self.layers+1)
         return session_emb
+'''
 
+class FindNeighbors(Module):
+    def __init__(self, hidden_size):
+        super(FindNeighbors, self).__init__()
+        self.hidden_size = hidden_size
+        self.neighbor_n = 3 # Diginetica:3; Tmall: 7; Nowplaying: 4
+        self.dropout40 = nn.Dropout(0.40)
+
+    def compute_sim(self, sess_emb):
+        fenzi = torch.matmul(sess_emb, sess_emb.permute(1, 0)) 
+        fenmu_l = torch.sum(sess_emb * sess_emb + 0.000001, 1)
+        fenmu_l = torch.sqrt(fenmu_l).unsqueeze(1)
+        fenmu = torch.matmul(fenmu_l, fenmu_l.permute(1, 0))
+        cos_sim = fenzi / fenmu 
+        cos_sim = nn.Softmax(dim=-1)(cos_sim)
+        return cos_sim
+
+    def forward(self, sess_emb):
+        k_v = self.neighbor_n 
+        cos_sim = self.compute_sim(sess_emb) 
+        if cos_sim.size()[0] < k_v:
+            k_v = cos_sim.size()[0]
+        cos_topk, topk_indice = torch.topk(cos_sim, k=k_v, dim=1)
+        cos_topk = nn.Softmax(dim=-1)(cos_topk)
+        sess_topk = sess_emb[topk_indice]
+
+        cos_sim = cos_topk.unsqueeze(2).expand(cos_topk.size()[0], cos_topk.size()[1], self.hidden_size)
+
+        neighbor_sess = torch.sum(cos_sim * sess_topk, 1)
+        neighbor_sess = self.dropout40(neighbor_sess)  # [b,d]
+        return neighbor_sess
+
+class RelationGAT(Module):
+    def __init__(self, batch_size, hidden_size=100):
+        super(RelationGAT, self).__init__()
+        self.batch_size = batch_size
+        self.dim = hidden_size
+        self.w_f = nn.Linear(2*hidden_size, hidden_size)
+        self.alpha_w = nn.Linear(self.dim, 1)
+        self.atten_w0 = nn.Parameter(torch.Tensor(1, self.dim))
+        self.atten_w1 = nn.Parameter(torch.Tensor(self.dim, self.dim))
+        self.atten_w2 = nn.Parameter(torch.Tensor(self.dim, self.dim))
+        self.atten_bias = nn.Parameter(torch.Tensor(self.dim))
+
+    def get_alpha(self, x=None):
+        # x[b,1,d]
+        alpha_global = torch.sigmoid(self.alpha_w(x)) + 1  #[b,1,1]
+        alpha_global = self.add_value(alpha_global)
+        return alpha_global #[b,1,1]
+
+
+    def add_value(self, value):
+        mask_value = (value == 1).float()
+        value = value.masked_fill(mask_value == 1, 1.00001)
+        return value
+
+
+    def tglobal_attention(self, target, k, v, alpha_ent=1):
+        alpha = torch.matmul(torch.relu(k.matmul(self.atten_w1) + target.matmul(self.atten_w2) + self.atten_bias),self.atten_w0.t())
+        alpha = entmax_bisect(alpha, alpha_ent, dim=1)
+        c = torch.matmul(alpha.transpose(1, 2), v)
+        return c
+
+    def forward(self, item_embedding, items, A, D, session_len, target_embedding):
+        zeros = torch.cuda.FloatTensor(1, self.dim).fill_(0)
+        # zeros = torch.zeros([1,self.emb_size])
+        item_embedding = torch.cat([zeros, item_embedding], 0)
+
+        seq_h = []
+        for i in torch.arange(items.shape[0]):
+            seq_h.append(torch.index_select(item_embedding, 0, items[i]))  # [b,s,d]
+
+        seq_h1 = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in seq_h])))
+        len = seq_h1.shape[1]
+        relation_emb_gcn = torch.div(torch.sum(seq_h1, 1), session_len)
+
+        #relation_emb_gcn = torch.sum(seq_h1, 1) #[b,d]
+        DA = torch.mm(D, A).float() #[b,b]
+        relation_emb_gcn = torch.mm(DA, relation_emb_gcn) #[b,d]
+        relation_emb_gcn = relation_emb_gcn.unsqueeze(1).expand(relation_emb_gcn.shape[0], 1, relation_emb_gcn.shape[1]) #[b,s,d]
+
+        # target_emb = self.w_f(target_embedding)
+        # alpha_line = self.get_alpha(x=target_emb)
+        # q = target_emb #[b,1,d]
+        # k = relation_emb_gcn #[b,1,d]
+        # v = relation_emb_gcn #[b,1,d]
+
+        # line_c = self.tglobal_attention(q, k, v, alpha_ent=alpha_line) #[b,1,d]
+        line_c = relation_emb_gcn
+        c = torch.selu(line_c).squeeze()
+        l_c = (c / torch.norm(c, dim=-1).unsqueeze(1))
+
+
+        return l_c #[b,d]
 
 class COTREC(Module):
     def __init__(self, adjacency, n_node, n_item,  opt, num_layers, num_hidden, num_classes,
                  heads, activation, feat_drop, attn_drop, negative_slope, residual, ret_num, n_relations=0, emb_size=100, relation_embSize=100):
         super(COTREC, self).__init__()
         self.emb_size = emb_size
+        self.dim = self.emb_size*2
+        dim = self.dim
         self.batch_size = opt.batchSize
         self.kg_embSize = opt.kg_embSize
         self.relation_embSize = relation_embSize
@@ -144,6 +258,30 @@ class COTREC(Module):
         self.w_k = 10
         self.num = 5000
         self.cl_alpha = opt.cl_alpha
+        
+        #MSGAT
+        self.is_dropout = True
+        self.w = 20
+        self.LN = nn.LayerNorm(dim)
+        self.activate = F.relu
+        self.attention_mlp = nn.Linear(dim, dim)
+        self.self_atten_w1 = nn.Linear(dim, dim)
+        self.self_atten_w2 = nn.Linear(dim, dim)
+        self.linear_one = nn.Linear(dim, dim, bias=True)
+        self.linear_two = nn.Linear(dim, dim, bias=True)
+        self.atten_w0 = nn.Parameter(torch.Tensor(1, dim))
+        self.atten_w1 = nn.Parameter(torch.Tensor(dim, dim))
+        self.atten_w2 = nn.Parameter(torch.Tensor(dim, dim))
+        self.atten_bias = nn.Parameter(torch.Tensor(dim))
+        self.w_f = nn.Linear(4 * self.emb_size, self.emb_size)
+        self.alpha_w = nn.Linear(dim, 1)
+        self.LayerNorm = LayerNorm(dim, eps=1e-12)
+        self.RelationGraph = RelationGAT(self.batch_size, self.emb_size)
+
+        #Multi
+        self.num_attention_heads = opt.num_attention_heads
+        self.attention_head_size = int(dim / self.num_attention_heads)
+        self.multi_alpha_w = nn.Linear(self.attention_head_size, 1)
 
         self.kg_gat_layers = nn.ModuleList()
         self.sub_gat_layers = nn.ModuleList()
@@ -155,6 +293,8 @@ class COTREC(Module):
         self.num_layers = num_layers
         tau = opt.temperature
         cl_dim = self.emb_size
+
+        self.FindNeighbor = FindNeighbors(self.emb_size)
         #self.raw = raw
         #self.itemTOsess = itemTOsess
 
@@ -180,7 +320,7 @@ class COTREC(Module):
         #self.embedding = nn.Embedding(self.n_node, self.emb_size)
         self.ret_num = ret_num
         self.embedding = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
-        self.cl_embed = nn.Parameter(torch.zeros((self.n_node, self.emb_size)))
+        self.cl_embed = nn.Parameter(torch.zeros((self.ret_num, self.kg_embSize)))
         self.kg_embedding = nn.Parameter(torch.zeros((self.n_node, self.kg_embSize)))
         #每個資料集的長度不一樣
         self.pos_len = 200
@@ -196,19 +336,17 @@ class COTREC(Module):
 
         self.relation_embed = nn.Parameter(torch.zeros((self.n_relations, self.relation_embSize)))
         self.pos_embedding = nn.Parameter(torch.zeros((self.pos_len, self.emb_size)))
+        self.pos_emb = nn.Embedding(300, self.emb_size, padding_idx=0, max_norm=1.5)
 
         self.HyperGraph = HyperConv(self.layers,opt.dataset) #多加的
-        self.SessGraph = SessConv(self.layers, self.batch_size)
+        #self.SessGraph = SessConv(self.layers, self.batch_size)
         self.w_1 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
         self.w_2 = nn.Parameter(torch.Tensor(self.emb_size, 1))
         self.w_i = nn.Linear(self.emb_size, self.emb_size)
         self.w_s = nn.Linear(self.emb_size, self.emb_size)
         self.glu1 = nn.Linear(self.emb_size, self.emb_size)
         self.glu2 = nn.Linear(self.emb_size, self.emb_size, bias=False)
-
-        self.W_q = nn.Parameter(torch.Tensor(self.emb_size, self.emb_size + 48))
-        self.W_k = nn.Parameter(torch.Tensor(self.emb_size, self.emb_size + 48))
-        self.W_init = nn.Parameter(torch.Tensor(self.emb_size, 2*self.emb_size))
+        self.dropout = nn.Dropout(0.2)
 
         #這個要怎麼初始化比較好還要再看一下
         self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.emb_size, self.relation_embSize))
@@ -217,8 +355,8 @@ class COTREC(Module):
         #用在注意力層
         self.a = nn.Parameter(torch.Tensor(2 * self.emb_size, 1))
 
-        self.adv_item = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
-        self.adv_sess = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_item = torch.cuda.FloatTensor(self.n_item, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_sess = torch.cuda.FloatTensor(self.n_item, self.emb_size).fill_(0).requires_grad_(True)
         # self.adv_item = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         # self.adv_sess = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         
@@ -296,30 +434,31 @@ class COTREC(Module):
         select = torch.sum(beta * seq_h, 1)
         return select
 
-    def generate_sess_emb_npos(self, item_embedding, session_item, session_len, reversed_sess_item, mask):
+    def generate_item_pos(self, item_embedding, session_item, session_len, reversed_sess_item, mask):
         zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
         # zeros = torch.zeros(1, self.emb_size)
+        
+        #因為這裡又加了一排0，所以取item embedding的時候可以照著item本身的ID取
         item_embedding = torch.cat([zeros, item_embedding], 0)
-        get = lambda i: item_embedding[reversed_sess_item[i]]
-        seq_h = torch.cuda.FloatTensor(self.batch_size, list(reversed_sess_item.shape)[1], self.emb_size).fill_(0)
+        get = lambda i: item_embedding[session_item[i]]
+        seq_h = torch.cuda.FloatTensor(self.batch_size, list(session_item.shape)[1], self.emb_size).fill_(0)
         # seq_h = torch.zeros(self.batch_size, list(reversed_sess_item.shape)[1], self.emb_size)
         for i in torch.arange(session_item.shape[0]):
             seq_h[i] = get(i)
-        hs = torch.div(torch.sum(seq_h, 1), session_len)
-        mask = mask.float().unsqueeze(-1)
+
         len = seq_h.shape[1]
 
-        hs = hs.unsqueeze(-2).repeat(1, len, 1)
-        #####
-        nh = seq_h
-        nh = torch.tanh(nh)
-        nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs))
-        #####
-        #nh = torch.sigmoid(self.glu1(seq_h) + self.glu2(hs))
-        beta = torch.matmul(nh, self.w_2)
-        beta = beta * mask
-        select = torch.sum(beta * seq_h, 1)
-        return select
+        position_ids = torch.arange(len, dtype=torch.long, device=seq_h.device)  # [s,]
+        position_ids = position_ids.unsqueeze(0).expand_as(session_item)  # [b,s]
+        position_embeddings = self.pos_emb(position_ids)  # [b,s,d]
+
+        #pos_emb = self.pos_emb[:len]
+        #pos_emb = pos_emb.unsqueeze(0).repeat(self.batch_size, 1, 1)
+
+        item_embedding_pos = torch.cat([seq_h, position_embeddings], -1)
+        item_embedding_pos = self.LayerNorm(item_embedding_pos)
+        
+        return item_embedding_pos
 
     def example_predicting(self, item_emb, sess_emb):
         ##不知道為甚麼原本的沒有轉置
@@ -389,38 +528,67 @@ class COTREC(Module):
             neg_emb_S[i] = item_emb_S[pos_ind_I[random_slices[i]]]
             neg_emb_I[i] = item_emb_I[pos_ind_S[random_slices[i]]]
         return pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S
+    
+    def get_alpha(self, x=None, seq_len=70, number=None):  # x[b,1,d], seq = len为每个会话序列中最后一个元素
+        if number == 0:
+            alpha_ent = torch.sigmoid(self.alpha_w(x)) + 1  # [b,1,1]
+            alpha_ent = self.add_value(alpha_ent).unsqueeze(1)  # [b,1,1]
+            alpha_ent = alpha_ent.expand(-1, seq_len, -1)  # [b,s+1,1]
+            return alpha_ent
+        if number == 1:  # x[b,1,d]
+            alpha_global = torch.sigmoid(self.alpha_w(x)) + 1  # [b,1,1]
+            alpha_global = self.add_value(alpha_global)
+            return alpha_global
 
-    '''def calc_kg_loss(self, h, r, pos_t, neg_t):
-        """
-        h:      (kg_batch_size)
-        r:      (kg_batch_size)
-        pos_t:  (kg_batch_size)
-        neg_t:  (kg_batch_size)
-        """
-        r_embed = self.relation_embed(r)                 # (kg_batch_size, relation_dim)
-        W_r = self.W_R[r]                                # (kg_batch_size, entity_dim, relation_dim)
-        zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
-        # zeros = torch.zeros(1, self.emb_size)
-        item_embedding = torch.cat([zeros, self.embedding.weight], 0)
-        h_embed = item_embedding[h]              # (kg_batch_size, entity_dim)
-        pos_t_embed = item_embedding[pos_t]      # (kg_batch_size, entity_dim)
-        neg_t_embed = item_embedding[neg_t]      # (kg_batch_size, entity_dim)
+    def get_alpha2(self, x=None, seq_len=70): #x [b,n,d/n]
+        alpha_ent = torch.sigmoid(self.multi_alpha_w(x)) + 1  # [b,n,1]
+        alpha_ent = self.add_value(alpha_ent).unsqueeze(2)  # [b,n,1,1]
+        alpha_ent = alpha_ent.expand(-1, -1, seq_len, -1)  # [b,n,s,1]
+        return alpha_ent
+    
+    def add_value(self, value):
+        mask_value = (value == 1).float()
+        value = value.masked_fill(mask_value == 1, 1.00001)
+        return value
+    
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+    
+    def Multi_Self_attention(self, q, k, v, sess_len):
+        is_dropout = True
+        if is_dropout:
+            q_ = self.dropout(self.activate(self.attention_mlp(q)))  # [b,s+1,2d]
+        else:
+            q_ = self.activate(self.attention_mlp(q))
 
-        r_mul_h = torch.bmm(h_embed.unsqueeze(1), W_r).squeeze(1)             # (kg_batch_size, relation_dim)
-        r_mul_pos_t = torch.bmm(pos_t_embed.unsqueeze(1), W_r).squeeze(1)     # (kg_batch_size, relation_dim)
-        r_mul_neg_t = torch.bmm(neg_t_embed.unsqueeze(1), W_r).squeeze(1)     # (kg_batch_size, relation_dim)
+        query_layer = self.transpose_for_scores(q_)
+        key_layer = self.transpose_for_scores(k)
+        value_layer = self.transpose_for_scores(v)
 
-        # Equation (1)
-        pos_score = torch.sum(torch.pow(r_mul_h + r_embed - r_mul_pos_t, 2), dim=1)     # (kg_batch_size)
-        neg_score = torch.sum(torch.pow(r_mul_h + r_embed - r_mul_neg_t, 2), dim=1)     # (kg_batch_size)
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
 
-        # Equation (2)
-        kg_loss = (-1.0) * F.logsigmoid(neg_score - pos_score)
-        kg_loss = torch.mean(kg_loss)
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
-        l2_loss = _L2_loss_mean(r_mul_h) + _L2_loss_mean(r_embed) + _L2_loss_mean(r_mul_pos_t) + _L2_loss_mean(r_mul_neg_t)
-        loss = kg_loss + self.kg_l2loss_lambda * l2_loss
-        return loss'''
+        alpha_ent = self.get_alpha2(query_layer[:, :, -1, :], seq_len=sess_len)
+
+        attention_probs = entmax_bisect(attention_scores, alpha_ent, dim=-1)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.dim,)
+        att_v = context_layer.view(*new_context_layer_shape)
+
+        if is_dropout:
+            att_v = self.dropout(self.self_atten_w2(self.activate(self.self_atten_w1(att_v)))) + att_v
+        else:
+            att_v = self.self_atten_w2(self.activate(self.self_atten_w1(att_v))) + att_v
+
+        att_v = self.LN(att_v)
+        c = att_v[:, -1, :].unsqueeze(1)  # [b,d]->[b,1,d]
+        x_n = att_v[:, :-1, :]  # [b,s,d]
+        return c, x_n
     
     def calc_cl_emb(self, g, drop_learn = False):
         all_embed = []
@@ -529,103 +697,101 @@ class COTREC(Module):
         loss = self.cl_alpha*cl_loss
         return loss
     
-    def SR_IEM(self, session_item, session_len, mask):
-        d = trans_to_cuda(torch.Tensor([self.emb_size]))
+    def global_attention(self, target, k, v, mask=None, alpha_ent=1):
+        alpha = torch.matmul(torch.relu(k.matmul(self.atten_w1) + target.matmul(self.atten_w2) + self.atten_bias), self.atten_w0.t())
+        if mask is not None: #[b,s]
+            mask = mask.unsqueeze(-1)
+            alpha = alpha.masked_fill(mask == 0, -np.inf)
+        alpha = entmax_bisect(alpha, alpha_ent, dim=1)
+        c = torch.matmul(alpha.transpose(1, 2), v)
+        return c
 
-        seq_h = torch.cuda.FloatTensor(self.batch_size, self.emb_size).fill_(0)
-        zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
-        cl_embed = torch.cat([zeros, self.cl_embed], 0)
-        #cl_embed = torch.cat([zeros, self.embedding], 0)
-        seq  = cl_embed[session_item]
 
-        Q = torch.sigmoid(torch.matmul(seq,self.W_q))
-        K = torch.sigmoid(torch.matmul(seq,self.W_k))
-        C = torch.div(torch.sigmoid(torch.matmul(Q, K.permute(0,2,1))), torch.sqrt(d.view(-1,1)))
+    # [b,d], [b,d]
+    def decoder(self, global_s, target_s):
+        if self.is_dropout:
+            c = self.dropout(torch.selu(self.w_f(torch.cat((global_s, target_s), 2))))
+        else:
+            c = torch.selu(self.w_f(torch.cat((global_s, target_s), 2)))  # [b,1,4d]
 
-        ##這邊在將C的對角線設為0，方便後面相加
-        result_matrix = mask[:, None] * mask.unsqueeze(2)
-        C = result_matrix * C
-        diag = torch.diagonal(C, dim1=1, dim2=2)
-        a_diag = torch.diag_embed(diag)
-        C = C-a_diag
-        
-        alpha = torch.sum(C, 2) / session_len
-        get = lambda i: alpha[i,:session_len[i]]
+        c = c.squeeze() #[b,d]
+        l_c = (c / torch.norm(c, dim=-1).unsqueeze(1))
+        return l_c
 
-        for i in torch.arange(session_item.shape[0]):
-            beta = F.softmax(get(i), 0)
-            session_long = torch.matmul(beta,seq[i,:session_len[i]])
-            seq_h[i] = session_long
-            #seq_h[i] = torch.matmul(self.W_init, torch.cat([session_long, seq[i,-1]], -1))
-        
-        return seq_h
+    def sess_final_get(self, hidden, mask, target_emb, att_hidden, relation_emb):  #Dual_att[b,d], Dual_g[b,d]
+        # # ht为local_embedding
+        # ht = hidden[torch.arange(mask.shape[0]).long(), torch.sum(mask, 1) - 1]  # batch_size x latent_size
+        # q1 = self.linear_one(ht).view(ht.shape[0], 1, ht.shape[1])  # batch_size x 1 x latent_size
+        # q2 = self.linear_two(hidden)  # batch_size x seq_length x latent_size
+
+        # sess_global = torch.sigmoid(q1 + q2) #[b,s,d]
+
+        # # Sparse Global Attention
+        # alpha_global = self.get_alpha(x=target_emb, number=1) #[b,1,2d]
+        # q = target_emb
+        # k = att_hidden #[b,s,2d]
+        # v = sess_global #[b,s,2d]
+        # global_c = self.global_attention(q, k, v, mask=mask, alpha_ent=alpha_global)
+        # sess_final = self.decoder(global_c, target_emb)
+
+        #SIC
+        neighbor_sess = self.FindNeighbor(relation_emb)
+        sess_final = neighbor_sess #[b,d]
+
+        return sess_final
 
     def train_loss(self, data, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg, reg_kg = self.calc_kg_emb(kg, True)
-        sess_emb_s = self.SR_IEM(session_item, session_len, mask)
-        #node_embedding_cf, reg_cf = self.calc_cl_emb(g, True)
-        #item_embedding_cf = node_embedding_cf[data.n_session:,:]
+        node_embedding_cf, reg_cf = self.calc_cl_emb(g, True)
+        item_embedding_cf = node_embedding_cf[data.n_session:,:]
         #item_embeddings_kg = self.calc_kg_emb(kg, False)
 
-        #if self.dataset == 'Tmall':
-        if self.dataset == '':
-            # for Tmall dataset, we do not use position embedding to learn temporal order
-            sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
-            sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
-        else:
-            sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
-            sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
+        
+        #這裡每個seesion的item順序是倒過來的
+        hy_item_embeddings = self.generate_item_pos(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
+        sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
+
+        zeros = torch.cuda.FloatTensor(hy_item_embeddings.shape[0], 1, self.dim).fill_(0)  # [b,1,2d]
+        session_target = torch.cat([hy_item_embeddings, zeros], 1)  # [b,s+1,2d]
+        sess_len = session_target.shape[1] 
+        target_emb, x_n = self.Multi_Self_attention(session_target, session_target, session_target, sess_len)  
+        relation_emb = self.RelationGraph(self.embedding, session_item, A, D, session_len, target_emb)
+        sess_emb_i = self.sess_final_get(hy_item_embeddings, mask, target_emb, x_n, relation_emb)
         
         sess_emb_i = self.w_k * F.normalize(sess_emb_i, dim=-1, p=2)
         sess_emb_kg = self.w_k * F.normalize(sess_emb_kg, dim=-1, p=2)
         item_embeddings_i = F.normalize(item_embeddings_i, dim=-1, p=2)
+        #b = F.normalize(self.embedding, dim=-1, p=2)
         item_embeddings_kg = F.normalize(item_embeddings_kg, dim=-1, p=2)
         
         session_embedding_all = torch.cat([sess_emb_i, sess_emb_kg], 1)
-        item_embeddings_all = torch.cat([item_embeddings_i, item_embeddings_kg], 1)
+        item_embeddings_all = torch.cat([self.embedding, item_embeddings_kg], 1)
         scores_item = torch.mm(session_embedding_all, torch.transpose(item_embeddings_all, 1, 0))
-        loss_item = self.loss_function(scores_item[:self.n_item], tar)
-
+        loss_item = self.loss_function(scores_item, tar)
+        loss_diff = 0
+        con_loss = 0
+        '''
+        sess_emb_s = node_embedding_cf[sessionID]
         #sess_emb_s = self.SessGraph(self.embedding, D, A, session_item, session_len)
         scores_sess = torch.mm(sess_emb_s, torch.transpose(item_embeddings_i, 1, 0))
-        #scores_sess = torch.mm(sess_emb_s, torch.transpose(self.cl_embed, 1, 0))
-        
         # compute probability of items to be positive examples
         pos_prob_I = self.example_predicting(item_embeddings_i, sess_emb_i)
-        #pos_prob_S = self.example_predicting(self.cl_embed, sess_emb_s)
         pos_prob_S = self.example_predicting(self.embedding, sess_emb_s)
 
         # choose top-10 items as positive samples and randomly choose 10 items as negative and get their embedding
-        #pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.cl_embed)
         pos_emb_I, neg_emb_I, pos_emb_S, neg_emb_S = self.topk_func_random(pos_prob_I,pos_prob_S, item_embeddings_i, self.embedding)
 
         last_item = torch.squeeze(reversed_sess_item[:, 0])
         last_item = last_item - 1
         last = item_embeddings_i.index_select(0, last_item)
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
-        #last = self.cl_embed[last_item]
         last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
         '''
-        # compute and update adversarial examples
-        self.adversarial_item(item_embeddings_i, tar, sess_emb_i)
-        self.adversarial_sess(self.cl_embed, tar, sess_emb_s)
-
-        adv_emb_item = item_embeddings_i + self.adv_item
-        adv_emb_sess = self.cl_embed + self.adv_sess
-
-        score_adv1 = torch.mm(sess_emb_s, torch.transpose(adv_emb_item, 1, 0))
-        score_adv2 = torch.mm(sess_emb_i, torch.transpose(adv_emb_sess, 1, 0))
-
-        # add difference constraint
-        #loss_diff = self.diff(scores_item, scores_sess, score_adv2, score_adv1, diff_mask)
-        loss_diff = self.diff(scores_item, scores_sess, score_adv1, score_adv2, diff_mask)
-        '''
+        #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
         
-        #return self.beta * con_loss, loss_item, scores_item[:self.n_item], loss_diff*self.lam
-        
-        return self.beta * con_loss, loss_item, scores_item[:self.n_item]
+        return self.beta * con_loss, loss_item, scores_item[:,:self.n_item]
         
 
     def test_loss(self, data, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
@@ -633,28 +799,31 @@ class COTREC(Module):
 
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg = self.calc_kg_emb(kg)
-        #if self.dataset == 'Tmall':
-        if self.dataset == '':
-            sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
-            sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
-        else:
-            sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
-            sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
-        
+        hy_item_embeddings = self.generate_item_pos(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
+        sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
+
+        zeros = torch.cuda.FloatTensor(hy_item_embeddings.shape[0], 1, self.dim).fill_(0)  # [b,1,2d]
+        session_target = torch.cat([hy_item_embeddings, zeros], 1)  # [b,s+1,2d]
+        sess_len = session_target.shape[1] 
+        target_emb, x_n = self.Multi_Self_attention(session_target, session_target, session_target, sess_len)  
+        relation_emb = self.RelationGraph(self.embedding, session_item, A, D, session_len, target_emb)
+        sess_emb_i = self.sess_final_get(hy_item_embeddings, mask, target_emb, x_n, relation_emb)
+
         sess_emb_i = self.w_k * F.normalize(sess_emb_i, dim=-1, p=2)
         sess_emb_kg = self.w_k * F.normalize(sess_emb_kg, dim=-1, p=2)
         item_embeddings_i = F.normalize(item_embeddings_i, dim=-1, p=2)
+        #b = F.normalize(self.embedding, dim=-1, p=2)
         item_embeddings_kg = F.normalize(item_embeddings_kg, dim=-1, p=2)
         #scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i[:41512], 1, 0))
         session_embedding_all = torch.cat([sess_emb_i, sess_emb_kg], 1)
-        item_embeddings_all = torch.cat([item_embeddings_i, item_embeddings_kg], 1)
+        item_embeddings_all = torch.cat([self.embedding, item_embeddings_kg], 1)
         scores_item = torch.mm(session_embedding_all, torch.transpose(item_embeddings_all, 1, 0))
         #scores_item = torch.mm(sess_emb_i, torch.transpose(item_embeddings_i[:41512], 1, 0))
-        loss_item = self.loss_function(scores_item[:self.n_item], tar)
+        loss_item = self.loss_function(scores_item, tar)
         loss_diff = 0
         con_loss = 0
-        #return self.beta * con_loss, loss_item, scores_item[:self.n_item], loss_diff*self.lam
-        return self.beta * con_loss, loss_item, scores_item[:self.n_item]
+        #return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
+        return self.beta * con_loss, loss_item, scores_item[:,:self.n_item]
     
     def forward(self, mode, *input):
         if mode == 'train_kg':
@@ -729,7 +898,7 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
     kg_drop = 0., 0.
 
     #開始訓練知識圖譜
-    for idx in range(n_kg_batch):
+    for idx in tqdm(range(n_kg_batch)):
         model.zero_grad()
         model.train()
         kg_batch_head, kg_batch_relation, kg_batch_pos_tail, kg_batch_neg_tail = train_data.generate_kg_batch(train_data.kg_dict)
@@ -743,9 +912,21 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
         model.optimizer.step()
         kg_total_loss += kge_loss.item()
     print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
+    '''
+    time2 = time()
+    for idx in range(n_cl_batch):
+        model.zero_grad()
+        batch_data = train_data.generate_train_cl_batch()
+        cl_loss = model("cl", sub_kg, batch_data['items'])
+
+        cl_loss.backward()
+        model.optimizer.step()
+        cl_total_loss += cl_loss.item()
+    print('CL Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_cl_batch, time() - time2, kg_total_loss / n_cl_batch))
+    '''
 
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
-    for i in range(len(slices)):
+    for i in tqdm(range(len(slices))):
         model.zero_grad()
         #tar, scores_item, con_loss, loss_item, loss_diff = forward(model, slices[i], sessionID[i], train_data, sub_kg, sub_cf_g, epoch, mode='train')
         #loss = loss_item + con_loss + loss_diff
@@ -783,5 +964,34 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
                     metrics['mrr%d' % K].append(1 / (np.where(prediction == target)[0][0] + 1))
     return metrics, total_loss
 
-
-
+def test(model, test_data, kg, g):
+    top_K = [5]
+    metrics = {}
+    for K in top_K:
+        metrics['hit%d' % K] = []
+        metrics['mrr%d' % K] = []
+        
+    print('start predicting: ', datetime.datetime.now())
+    
+    model.eval()
+    slices, sessionID = test_data.generate_batch(model.batch_size)
+    f = open('./prediction.txt', 'a')
+    for i in range(len(slices)):
+        tar, scores_item, con_loss, loss_item = forward(model, slices[i], sessionID[i], test_data, kg, g, 0, mode='test')
+        scores = trans_to_cpu(scores_item).detach().numpy()
+        index = []
+        for idd in range(model.batch_size):
+            index.append(find_k_largest(5, scores[idd]))
+        index = np.array(index)
+        tar = trans_to_cpu(tar).detach().numpy()
+        for K in top_K:
+            # for prediction, target in zip(index[:, :K], tar):
+            #     metrics['hit%d' % K].append(np.isin(target, prediction))
+            #     if len(np.where(prediction == target)[0]) == 0:
+            #         metrics['mrr%d' % K].append(0)
+            #     else:
+            #         metrics['mrr%d' % K].append(1 / (np.where(prediction == target)[0][0] + 1))
+            for id, prediction in zip(sessionID[i], index[:, :K]):
+                f.write('%d %d %d %d %d %d\n' % (id, prediction[0], prediction[1], prediction[2], prediction[3], prediction[4]))
+    f.close()
+    return metrics
