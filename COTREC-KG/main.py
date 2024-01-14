@@ -9,7 +9,7 @@ import dgl
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=7, help='number of epochs to train for')
+parser.add_argument('--epoch', type=int, default=30, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
@@ -59,7 +59,7 @@ def main():
         n_node = 309
     train_data = Data(train_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=True)
     test_data = Data(test_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=False)
-    ret_num = train_data.n_session + n_item
+    ret_num = train_data.n_session + train_data.n_items
     ##新加的
     weight_size = eval(opt.layer_size)
     num_layers = len(weight_size) - 2
