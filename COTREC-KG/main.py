@@ -5,11 +5,20 @@ import os
 import argparse
 import pickle
 import dgl
+import logging
+
+def init_seed(seed=None):
+    if seed is None:
+        seed = int(time.time() * 1000 // 1000)
+    np.random.seed(seed)
+    # torch.manual_seed(seed)
+    # torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
 
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--dataset', default='Tmall', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=10, help='number of epochs to train for')
+parser.add_argument('--dataset', default='KKBOX', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
+parser.add_argument('--epoch', type=int, default=4, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
@@ -31,14 +40,26 @@ parser.add_argument('--adj_type', nargs='?', default='si',help='Specify the type
 parser.add_argument('--batch_size_cl', type=int, default=8192, help='CL batch size.')
 parser.add_argument('--cl_alpha', type=float, default=1.)
 parser.add_argument('--temperature', type=float, default=0.7, help='Softmax temperature.')
+parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
+parser.add_argument('--lr_dc_step', type=int, default=2, help='the number of steps after which the learning rate decay 3')
 
 
 opt = parser.parse_args()
 print(opt)
+
+logging.basicConfig(
+    filename='my_KKBOX.log', 
+    level=logging.INFO, 
+    format='%(asctime)s,%(msecs)03d [%(levelname)s] %(name)s: %(message)s',  
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logging.info(opt)
+
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 # torch.cuda.set_device(1)
 
 def main():
+    init_seed(2023)
     train_data = pickle.load(open('../datasets/' + opt.dataset + '/train.txt', 'rb'))
     test_data = pickle.load(open('../datasets/' + opt.dataset + '/test.txt', 'rb'))
     all_train = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
@@ -49,8 +70,13 @@ def main():
         n_item = 41512
         #n_item = max(max(max(train_data[0])), max(max(test_data[0])))
         n_node = 50840
-    elif opt.dataset == 'retailrocket':
-        n_node = 36968
+    elif opt.dataset == 'KKBOX':
+        n_item = 23838
+        n_node = 60826
+    elif opt.dataset == 'Retailrocket':
+        n_item = 25390
+        # print(max(max(max(train_data[0])), max(max(test_data[0]))))
+        n_node = 73946
     elif opt.dataset == 'movielen_20M':
         n_node = 102569 #已經有加KG裡的entity數
     elif opt.dataset == 'ml-1m':
@@ -112,6 +138,8 @@ def main():
         best_results['metric%d' % K] = [0, 0]
 
     for epoch in range(opt.epoch):
+        logging.info('-------------------------------------------------------')
+        logging.info('epoch: %d'% epoch)
         print('-------------------------------------------------------')
         print('epoch: ', epoch)
         metrics, total_loss = train_test(model, train_data, test_data, kg, g, epoch, opt.drop_rate)
@@ -124,14 +152,18 @@ def main():
             if best_results['metric%d' % K][1] < metrics['mrr%d' % K]:
                 best_results['metric%d' % K][1] = metrics['mrr%d' % K]
                 best_results['epoch%d' % K][1] = epoch
+        logging.info(metrics)
         print(metrics)
         for K in top_K:
+            logging.info('train_loss:\t%.4f\tRecall@%d: %.4f\tMRR%d: %.4f\tEpoch: %d,  %d' %
+                  (total_loss, K, best_results['metric%d' % K][0], K, best_results['metric%d' % K][1],
+                   best_results['epoch%d' % K][0], best_results['epoch%d' % K][1]))
             print('train_loss:\t%.4f\tRecall@%d: %.4f\tMRR%d: %.4f\tEpoch: %d,  %d' %
                   (total_loss, K, best_results['metric%d' % K][0], K, best_results['metric%d' % K][1],
                    best_results['epoch%d' % K][0], best_results['epoch%d' % K][1]))
+    
+    logging.info('-------------------------------------------------------')
 
 
 if __name__ == '__main__':
-    torch.manual_seed(2023)
-    np.random.seed(2023)
     main()
