@@ -77,7 +77,7 @@ def data_masks(all_sessions, n_node):
     return matrix, itemTOsess
 '''
 class Data():
-    def __init__(self, data, all_train, opt, shuffle=False, n_item=None, n_node=None, KG=False):
+    def __init__(self, dataset, data, all_train, opt, shuffle=False, n_item=None, n_node=None, KG=False):
         self.raw = np.asarray(data[0], dtype="object")
         H_T, self.n_session, self.item_dict, self.cf_data = data_masks(self.raw, n_node)
         BH_T = H_T.T.multiply(1.0/H_T.sum(axis=1).reshape(1, -1))
@@ -104,7 +104,7 @@ class Data():
         if KG:
             self.kg_batch_size = opt.kg_batch_size
             self.cl_batch_size = opt.batch_size_cl
-            kg_data = self.load_kg('../datasets/KKBOX/kg.txt')
+            kg_data = self.load_kg('../datasets/'+dataset+'/kg.txt')
             print(time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime()), '-- kg data load --')
             self.construct_data(kg_data)
             self.all_kg_dict = self._get_all_kg_dict()

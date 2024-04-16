@@ -11,44 +11,44 @@ def init_seed(seed=None):
     if seed is None:
         seed = int(time.time() * 1000 // 1000)
     np.random.seed(seed)
-    # torch.manual_seed(seed)
+    torch.manual_seed(seed)
     # torch.cuda.manual_seed(seed)
     # torch.cuda.manual_seed_all(seed)
 
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--dataset', default='KKBOX', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=4, help='number of epochs to train for')
+parser.add_argument('--dataset', default='Retailrocket', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
+parser.add_argument('--epoch', type=int, default=15, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
 parser.add_argument('--kg_embSize', type=int, default=64, help='embedding size')
 parser.add_argument('--relation_embSize', type=int, default=112, help='Relation Embedding size')
-parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
-parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5, help='Lambda when calculating KG l2 loss.')
+parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')#用不到
+parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5, help='Lambda when calculating KG l2 loss.')#用不到
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-parser.add_argument('--layer', type=float, default=2, help='the number of layer used')
+parser.add_argument('--layer', type=int, default=1, help='the number of layer used')
 parser.add_argument('--beta', type=float, default=0.01, help='ssl task maginitude')
-parser.add_argument('--lam', type=float, default=0.005, help='diff task maginitude')
-parser.add_argument('--eps', type=float, default=0.2, help='eps')
+parser.add_argument('--lam', type=float, default=0.005, help='diff task maginitude') #這也用不到
+parser.add_argument('--eps', type=float, default=0.2, help='eps') #這個用不到
 parser.add_argument('--filter', type=bool, default=False, help='filter incidence matrix')#多加的
 parser.add_argument('--layer_size', nargs='?', default='[64, 32, 16]', help='Output sizes of every layer')
 parser.add_argument('--heads', type=int, default=1)
 parser.add_argument('--drop_rate', type=float, default=0.7, help='CL dropout rate.')
-parser.add_argument('--alpha', type=float, default=0.)
+parser.add_argument('--alpha', type=float, default=0.) #這個用不到
 parser.add_argument('--adj_type', nargs='?', default='si',help='Specify the type of the adjacency (laplacian) matrix from {bi, si}.')
 parser.add_argument('--batch_size_cl', type=int, default=8192, help='CL batch size.')
-parser.add_argument('--cl_alpha', type=float, default=1.)
-parser.add_argument('--temperature', type=float, default=0.7, help='Softmax temperature.')
-parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
-parser.add_argument('--lr_dc_step', type=int, default=2, help='the number of steps after which the learning rate decay 3')
+parser.add_argument('--cl_alpha', type=float, default=1.)#也用不到
+parser.add_argument('--temperature', type=float, default=0.7, help='Softmax temperature.') #也用不到
+# parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
+# parser.add_argument('--lr_dc_step', type=int, default=2, help='the number of steps after which the learning rate decay 3')
 
 
 opt = parser.parse_args()
 print(opt)
 
 logging.basicConfig(
-    filename='my_KKBOX.log', 
+    filename='./log/%s_Concat_test3_drop_rate.log' % opt.dataset, 
     level=logging.INFO, 
     format='%(asctime)s,%(msecs)03d [%(levelname)s] %(name)s: %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'
@@ -83,8 +83,8 @@ def main():
         n_node = 142569 #已經有加KG裡的entity數
     else:
         n_node = 309
-    train_data = Data(train_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=True)
-    test_data = Data(test_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=False)
+    train_data = Data(opt.dataset, train_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=True)
+    test_data = Data(opt.dataset, test_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=False)
     ret_num = train_data.n_session + train_data.n_items
     ##新加的
     weight_size = eval(opt.layer_size)

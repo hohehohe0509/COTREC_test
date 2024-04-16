@@ -14,8 +14,6 @@ import heapq
 import dgl
 from conv import myGATConv, DropLearner
 from tqdm import tqdm_notebook as tqdm
-from entmax import entmax_bisect
-import logging
 
 def trans_to_cuda(variable):
     if torch.cuda.is_available():
@@ -174,8 +172,6 @@ class COTREC(Module):
         self.n_item = n_item
         self.n_relations = n_relations
         self.dataset = opt.dataset
-        self.L2 = opt.l2
-        self.kg_l2loss_lambda = opt.kg_l2loss_lambda
         self.lr = opt.lr
         self.layers = opt.layer
         self.beta = opt.beta
@@ -203,6 +199,12 @@ class COTREC(Module):
         
         values = adjacency.data
         indices = np.vstack((adjacency.row, adjacency.col))
+        if opt.dataset == 'Nowplaying':
+            index_fliter = (values < 0.05).nonzero()
+            values = np.delete(values, index_fliter)
+            indices1 = np.delete(indices[0], index_fliter)
+            indices2 = np.delete(indices[1], index_fliter)
+            indices = [indices1, indices2]
         i = torch.LongTensor(indices)
         v = torch.FloatTensor(values)
         shape = adjacency.shape
@@ -237,9 +239,11 @@ class COTREC(Module):
         self.w_1 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
         self.w_2 = nn.Parameter(torch.Tensor(self.emb_size, 1))
         self.w_i = nn.Linear(self.emb_size, self.emb_size)
-        self.w_s = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
+        self.w_s = nn.Linear(self.emb_size, self.emb_size)
         self.glu1 = nn.Linear(self.emb_size, self.emb_size)
         self.glu2 = nn.Linear(self.emb_size, self.emb_size, bias=False)
+        self.glu3 = nn.Linear(self.emb_size, self.emb_size)
+        self.linear_transform = nn.Linear(self.emb_size * 2, self.emb_size, bias=True)
 
         #這個要怎麼初始化比較好還要再看一下
         self.W_R = nn.Parameter(torch.Tensor(self.n_relations, self.emb_size, self.relation_embSize))
@@ -247,6 +251,11 @@ class COTREC(Module):
 
         #用在注意力層
         self.a = nn.Parameter(torch.Tensor(2 * self.emb_size, 1))
+
+        self.adv_item = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
+        self.adv_sess = torch.cuda.FloatTensor(self.n_node, self.emb_size).fill_(0).requires_grad_(True)
+        # self.adv_item = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
+        # self.adv_sess = torch.zeros(self.n_node, self.emb_size).requires_grad_(True)
         
         # input projection (no residual)
         self.sub_gat_layers.append(myGATConv(self.kg_embSize, num_hidden, heads[0],
@@ -292,40 +301,7 @@ class COTREC(Module):
             if weight.ndim==1:
                 nn.init.xavier_normal_(weight.unsqueeze(0), gain=1.414)
             else:
-                nn.init.xavier_normal_(weight, gain=1.414)
-
-    # def generate_sess_emb(self, item_embedding, session_item, session_len, reversed_sess_item, mask):
-    #     zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
-        
-    #     item_embedding = torch.cat([zeros, item_embedding], 0)
-    #     get = lambda i: item_embedding[reversed_sess_item[i]]
-    #     seq_h = torch.cuda.FloatTensor(self.batch_size, list(reversed_sess_item.shape)[1], self.emb_size).fill_(0)
-    #     for i in torch.arange(session_item.shape[0]):
-    #         seq_h[i] = get(i)
-
-    #     mask = mask.float().unsqueeze(-1)        
-    #     len = seq_h.shape[1]
-    #     pos_emb = self.pos_embedding[:len]
-    #     pos_emb = pos_emb.unsqueeze(0).repeat(self.batch_size, 1, 1)
-        
-    #     hs = torch.div(torch.sum(seq_h, 1), session_len)
-    #     hs = hs.unsqueeze(-2).repeat(1, len, 1)
-    #     ht = seq_h[:, 0, :]
-    #     ht = ht.unsqueeze(-2).repeat(1, len, 1)             # (b, N, dim)
-
-    #     hs = torch.cat([hs, ht], -1).matmul(self.w_s)
-        
-    #     nh = torch.matmul(torch.cat([pos_emb, seq_h], -1), self.w_1)
-    #     nh = torch.tanh(nh)
-
-    #     feat = hs * seq_h 
-        
-    #     # nh = torch.sigmoid(torch.cat([self.glu1(nh), self.glu2(hs), self.glu3(feat)], -1))
-    #     nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs) + self.glu3(feat))
-    #     beta = torch.matmul(nh, self.w_2)
-    #     beta = beta * mask
-    #     select = torch.sum(beta * seq_h, 1)
-    #     return select
+                nn.init.xavier_normal_(weight, gain=1.414)    
 
     def generate_sess_emb(self, item_embedding, session_item, session_len, reversed_sess_item, mask):
         zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
@@ -345,14 +321,16 @@ class COTREC(Module):
         len = seq_h.shape[1]
         pos_emb = self.pos_embedding[:len]
         pos_emb = pos_emb.unsqueeze(0).repeat(self.batch_size, 1, 1)
-
         hs = hs.unsqueeze(-2).repeat(1, len, 1)
+        last_item = item_embedding[reversed_sess_item[:,0]].unsqueeze(-2).repeat(1, len, 1)
         nh = torch.matmul(torch.cat([pos_emb, seq_h], -1), self.w_1)
         nh = torch.tanh(nh)
-        nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs))
+        # nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs))
+        nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs) +self.glu3(last_item))
         beta = torch.matmul(nh, self.w_2)
         beta = beta * mask
         select = torch.sum(beta * seq_h, 1)
+        # select = self.linear_transform(torch.cat([select, item_embedding[reversed_sess_item[:,0]]], 1))
         return select
 
     def generate_sess_emb_npos(self, item_embedding, session_item, session_len, reversed_sess_item, mask):
@@ -369,15 +347,18 @@ class COTREC(Module):
         len = seq_h.shape[1]
 
         hs = hs.unsqueeze(-2).repeat(1, len, 1)
+        last_item = item_embedding[reversed_sess_item[:,0]].unsqueeze(-2).repeat(1, len, 1)
         #####
         nh = seq_h
         nh = torch.tanh(nh)
-        nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs))
+        # nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs))
+        nh = torch.sigmoid(self.glu1(nh) + self.glu2(hs) +self.glu3(last_item))
         #####
         #nh = torch.sigmoid(self.glu1(seq_h) + self.glu2(hs))
         beta = torch.matmul(nh, self.w_2)
         beta = beta * mask
         select = torch.sum(beta * seq_h, 1)
+        # select = self.linear_transform(torch.cat([select, item_embedding[reversed_sess_item[:,0]]], 1))
         return select
 
     def example_predicting(self, item_emb, sess_emb):
@@ -560,10 +541,10 @@ class COTREC(Module):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg, reg_kg = self.calc_kg_emb(kg, True)
         # item_embedding_cf, reg_cf = self.calc_cl_emb(g, True)
-        # item_embeddings_kg = self.calc_kg_emb(kg, False)
+        #item_embeddings_kg = self.calc_kg_emb(kg, False)
 
         if self.dataset == 'Tmall':
-        #if self.dataset == '':
+        # if self.dataset == '':
             # for Tmall dataset, we do not use position embedding to learn temporal order
             sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
             sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
@@ -597,22 +578,7 @@ class COTREC(Module):
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
         last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
-        '''
-        # compute and update adversarial examples
-        self.adversarial_item(item_embeddings_i, tar, sess_emb_i)
-        self.adversarial_sess(item_embeddings_i, tar, sess_emb_s)
-
-        adv_emb_item = item_embeddings_i + self.adv_item
-        adv_emb_sess = item_embeddings_i + self.adv_sess
-
-        score_adv1 = torch.mm(sess_emb_s, torch.transpose(adv_emb_item, 1, 0))
-        score_adv2 = torch.mm(sess_emb_i, torch.transpose(adv_emb_sess, 1, 0))
-        # add difference constraint
-        loss_diff = self.diff(scores_item, scores_sess, score_adv2, score_adv1, diff_mask)
-        #41512是只有item沒有entity
-        #return self.beta * con_loss, loss_item, scores_item[:41512], loss_diff*self.lam
-        return self.beta * con_loss, loss_item, scores_item, loss_diff*self.lam
-        '''
+        
         return self.beta * con_loss, loss_item, scores_item[:,:self.n_item]
 
     def test_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
@@ -621,7 +587,7 @@ class COTREC(Module):
         item_embeddings_i = self.HyperGraph(self.adjacency, self.embedding)
         item_embeddings_kg = self.calc_kg_emb(kg)
         if self.dataset == 'Tmall':
-        #if self.dataset == '':
+        # if self.dataset == '':
             sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
             sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
         else:
@@ -729,7 +695,6 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
         kge_loss.backward()
         model.optimizer.step()
         kg_total_loss += kge_loss.item()
-    logging.info('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
     print('KG Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_kg_batch, time() - time1, kg_total_loss / n_kg_batch))
     
     #i會是一個list，內存當前batch應該取出哪幾個session(index)，例：[0,1,2,3,4,5]，由於數據集本身已被打亂，所以取出的index都會照順序，而不是隨機亂跳
@@ -742,7 +707,6 @@ def train_test(model, train_data, test_data, kg, g, epoch, drop_rate):
         loss.backward()
         model.optimizer.step()
         total_loss += loss.item()
-    logging.info('\tLoss:\t%.3f' % total_loss)
     print('\tLoss:\t%.3f' % total_loss)
     
     '''time2 = time()
