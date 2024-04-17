@@ -18,7 +18,7 @@ def init_seed(seed=None):
 parser = argparse.ArgumentParser()
 #parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--dataset', default='Retailrocket', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
-parser.add_argument('--epoch', type=int, default=15, help='number of epochs to train for')
+parser.add_argument('--epoch', type=int, default=7, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
 parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch size.')
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
@@ -28,7 +28,7 @@ parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')#用不�
 parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5, help='Lambda when calculating KG l2 loss.')#用不到
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--layer', type=int, default=1, help='the number of layer used')
-parser.add_argument('--beta', type=float, default=0.01, help='ssl task maginitude')
+parser.add_argument('--beta', type=float, default=0.001, help='ssl task maginitude')
 parser.add_argument('--lam', type=float, default=0.005, help='diff task maginitude') #這也用不到
 parser.add_argument('--eps', type=float, default=0.2, help='eps') #這個用不到
 parser.add_argument('--filter', type=bool, default=False, help='filter incidence matrix')#多加的
@@ -48,7 +48,7 @@ opt = parser.parse_args()
 print(opt)
 
 logging.basicConfig(
-    filename='./log/%s_Concat_test3_drop_rate.log' % opt.dataset, 
+    filename='./log/%s_Concat_allt.log' % opt.dataset, 
     level=logging.INFO, 
     format='%(asctime)s,%(msecs)03d [%(levelname)s] %(name)s: %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'

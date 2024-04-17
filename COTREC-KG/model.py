@@ -190,7 +190,7 @@ class COTREC(Module):
         self.epsilon = torch.FloatTensor([1e-12]).cuda()
         self.kg_edge_weight = None
         self.num_layers = num_layers
-        tau = opt.temperature
+        self.tau = opt.temperature
         cl_dim = self.emb_size
         #self.raw = raw
         #self.itemTOsess = itemTOsess
@@ -288,7 +288,7 @@ class COTREC(Module):
         self.learner1 = DropLearner(self.kg_embSize, self.kg_embSize)
         self.learner2 = DropLearner(self.kg_embSize, self.kg_embSize, self.kg_embSize)
         
-        self.contrast = Contrast_2view(self.emb_size, self.kg_embSize + 48, cl_dim, tau, opt.batch_size_cl)
+#         self.contrast = Contrast_2view(self.emb_size, self.kg_embSize + 48, cl_dim, tau, opt.batch_size_cl)
         self.loss_function = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         self.init_parameters()
@@ -409,8 +409,8 @@ class COTREC(Module):
         neg = torch.reshape(neg, (self.batch_size, self.K, self.emb_size)) + sess_emb.unsqueeze(1).repeat(1, self.K, 1)
         pos_score = score(anchor.unsqueeze(1).repeat(1, self.K, 1), F.normalize(pos, p=2, dim=-1))
         neg_score = score(anchor.unsqueeze(1).repeat(1, self.K, 1), F.normalize(neg, p=2, dim=-1))
-        pos_score = torch.sum(torch.exp(pos_score / 0.2), 1)
-        neg_score = torch.sum(torch.exp(neg_score / 0.2), 1)
+        pos_score = torch.sum(torch.exp(pos_score / self.tau), 1)
+        neg_score = torch.sum(torch.exp(neg_score / self.tau), 1)
         con_loss = -torch.sum(torch.log(pos_score / (pos_score + neg_score)))
         return con_loss
 
@@ -578,7 +578,6 @@ class COTREC(Module):
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
         last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
-        
         return self.beta * con_loss, loss_item, scores_item[:,:self.n_item]
 
     def test_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
