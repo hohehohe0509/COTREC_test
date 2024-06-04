@@ -112,7 +112,7 @@ class DropLearner(nn.Module):
         reg = edge_drop_out_prob.mean()
         aug_edge_weight = aug_edge_weight.unsqueeze(-1).unsqueeze(-1)
         #print(aug_edge_weight.size())
-        return reg, aug_edge_weight
+        return 0*reg, aug_edge_weight
         
 
 

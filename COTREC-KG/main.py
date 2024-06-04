@@ -40,6 +40,7 @@ parser.add_argument('--adj_type', nargs='?', default='si',help='Specify the type
 parser.add_argument('--batch_size_cl', type=int, default=8192, help='CL batch size.')
 parser.add_argument('--cl_alpha', type=float, default=1.)#也用不到
 parser.add_argument('--temperature', type=float, default=0.7, help='Softmax temperature.') #也用不到
+parser.add_argument('--K', type=int, default=10, help='')
 # parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
 # parser.add_argument('--lr_dc_step', type=int, default=2, help='the number of steps after which the learning rate decay 3')
 
@@ -48,7 +49,7 @@ opt = parser.parse_args()
 print(opt)
 
 logging.basicConfig(
-    filename='./log/%s_Concat_allt.log' % opt.dataset, 
+    filename='./log/%s_noCat_conv0.7_5.log' % opt.dataset, 
     level=logging.INFO, 
     format='%(asctime)s,%(msecs)03d [%(levelname)s] %(name)s: %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'
@@ -122,15 +123,10 @@ def main():
     #e_feat裡面存每個triple的relation是誰，是一個list（按照kg.edges()的順序存）
     e_feat = torch.tensor(e_feat, dtype=torch.long).to('cuda')
     kg = kg.to('cuda')
-    ##新加的
-
-    #Attention
-    #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,raw=train_data.raw,itemTOsess = train_data.itemTOsess, n_node=n_node,n_relations=train_data.n_relations,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
     
     #有KG
     model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,n_item=train_data.n_items,n_relations=train_data.n_relations,opt=opt,num_layers=num_layers, num_hidden=weight_size[-2], num_classes=weight_size[-1],  heads=heads, activation=F.elu, feat_drop=0.1, attn_drop=0., negative_slope=0.01, residual=False,emb_size=opt.embSize, relation_embSize=opt.relation_embSize, ret_num=ret_num))
-    
-    #model = trans_to_cuda(COTREC(adjacency=train_data.adjacency,n_node=n_node,lr=opt.lr, l2=opt.l2, beta=opt.beta,lam= opt.lam,eps=opt.eps,layers=opt.layer,emb_size=opt.embSize, batch_size=opt.batchSize,dataset=opt.dataset, relation_embSize=opt.relation_embSize, kg_l2loss_lambda=opt.kg_l2loss_lambda))
+
     top_K = [5, 10, 20]
     best_results = {}
     for K in top_K:
