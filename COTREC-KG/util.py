@@ -301,20 +301,6 @@ class Data():
                 all_kg_dict[head].append((tail, relation))
         return all_kg_dict
     
-    def _generate_train_cl_batch(self):
-        if self.cl_batch_size <= len(self.exist_items):
-            items = random.sample(self.exist_items, self.cl_batch_size)
-        else:
-            items_list = list(self.exist_items)
-            items = [random.choice(items_list) for _ in range(self.cl_batch_size)]
-        return items
-
-    def generate_train_cl_batch(self):
-        items = self._generate_train_cl_batch()
-        batch_data = {}
-        batch_data['items'] = items
-        return batch_data
-    
     def _get_cf_adj_list(self, is_subgraph = False, dropout_rate = None):
         def _np_mat2sp_adj(np_mat, row_pre, col_pre):
             n_all = self.n_session + self.n_items

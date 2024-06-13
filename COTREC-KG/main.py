@@ -21,6 +21,7 @@ parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch siz
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
 parser.add_argument('--kg_embSize', type=int, default=64, help='embedding size')
 parser.add_argument('--relation_embSize', type=int, default=112, help='Relation Embedding size')
+parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')#用不到
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--layer', type=int, default=1, help='the number of layer used')
 parser.add_argument('--beta', type=float, default=0.001, help='ssl task maginitude')
@@ -43,7 +44,7 @@ opt = parser.parse_args()
 print(opt)
 
 logging.basicConfig(
-    filename='./log/%s_noCat_conv0.7_5_HPNOSR.log' % opt.dataset, 
+    filename='./clear/%s_test1.log' % opt.dataset, 
     level=logging.INFO, 
     format='%(asctime)s,%(msecs)03d [%(levelname)s] %(name)s: %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'
