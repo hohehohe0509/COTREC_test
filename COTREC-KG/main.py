@@ -12,11 +12,8 @@ def init_seed(seed=None):
         seed = int(time.time() * 1000 // 1000)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    # torch.cuda.manual_seed(seed)
-    # torch.cuda.manual_seed_all(seed)
 
 parser = argparse.ArgumentParser()
-#parser.add_argument('--dataset', default='movielen_20M', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--dataset', default='Retailrocket', help='dataset name: retailrocket/diginetica/Nowplaying/sample')
 parser.add_argument('--epoch', type=int, default=7, help='number of epochs to train for')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
@@ -24,12 +21,9 @@ parser.add_argument('--kg_batch_size', type=int, default=100, help='KG batch siz
 parser.add_argument('--embSize', type=int, default=112, help='embedding size')
 parser.add_argument('--kg_embSize', type=int, default=64, help='embedding size')
 parser.add_argument('--relation_embSize', type=int, default=112, help='Relation Embedding size')
-parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')#用不到
-parser.add_argument('--kg_l2loss_lambda', type=float, default=1e-5, help='Lambda when calculating KG l2 loss.')#用不到
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--layer', type=int, default=1, help='the number of layer used')
 parser.add_argument('--beta', type=float, default=0.001, help='ssl task maginitude')
-parser.add_argument('--lam', type=float, default=0.005, help='diff task maginitude') #這也用不到
 parser.add_argument('--eps', type=float, default=0.2, help='eps') #這個用不到
 parser.add_argument('--filter', type=bool, default=False, help='filter incidence matrix')#多加的
 parser.add_argument('--layer_size', nargs='?', default='[64, 32, 16]', help='Output sizes of every layer')
@@ -49,7 +43,7 @@ opt = parser.parse_args()
 print(opt)
 
 logging.basicConfig(
-    filename='./log/%s_noCat_conv0.7_5.log' % opt.dataset, 
+    filename='./log/%s_noCat_conv0.7_5_HPNOSR.log' % opt.dataset, 
     level=logging.INFO, 
     format='%(asctime)s,%(msecs)03d [%(levelname)s] %(name)s: %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'
@@ -64,37 +58,27 @@ def main():
     train_data = pickle.load(open('../datasets/' + opt.dataset + '/train.txt', 'rb'))
     test_data = pickle.load(open('../datasets/' + opt.dataset + '/test.txt', 'rb'))
     all_train = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
-    if opt.dataset == 'diginetica':
-        n_node = 43097
-    elif opt.dataset == 'Tmall':
-        #n_node = 40727
+
+    if opt.dataset == 'Tmall':
         n_item = 41512
-        #n_item = max(max(max(train_data[0])), max(max(test_data[0])))
         n_node = 50840
     elif opt.dataset == 'KKBOX':
         n_item = 23838
         n_node = 60826
     elif opt.dataset == 'Retailrocket':
         n_item = 25390
-        # print(max(max(max(train_data[0])), max(max(test_data[0]))))
         n_node = 73946
-    elif opt.dataset == 'movielen_20M':
-        n_node = 102569 #已經有加KG裡的entity數
-    elif opt.dataset == 'ml-1m':
-        n_node = 142569 #已經有加KG裡的entity數
-    else:
-        n_node = 309
+        
     train_data = Data(opt.dataset, train_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=True)
     test_data = Data(opt.dataset, test_data,all_train,opt, shuffle=True, n_item=n_item, n_node=n_node, KG=False)
     ret_num = train_data.n_session + train_data.n_items
+    
     ##新加的
     weight_size = eval(opt.layer_size)
     num_layers = len(weight_size) - 2
     heads = [opt.heads] * num_layers + [1]
-
     adjM = train_data.lap_list
 
-    print(len(adjM.nonzero()[0]))
     g = dgl.DGLGraph(adjM)
     g = dgl.remove_self_loop(g)
     g = dgl.add_self_loop(g)

@@ -140,15 +140,15 @@ class SessConv(Module):
         return seq_h
 
     def forward(self, item_embedding, D, A, session_item, session_len, mask):
-        # zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
+        zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
         # # zeros = torch.zeros([1,self.emb_size])
-        # item_embedding = torch.cat([zeros, item_embedding], 0)
-        # seq_h = []
-        # for i in torch.arange(len(session_item)):
-        #     seq_h.append(torch.index_select(item_embedding, 0, session_item[i]))
-        # seq_h1 = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in seq_h])))
-        # session_emb = torch.div(torch.sum(seq_h1, 1), session_len)
-        session_emb = self.SR_IEM(item_embedding, session_item, session_len, mask)
+        item_embedding = torch.cat([zeros, item_embedding], 0)
+        seq_h = []
+        for i in torch.arange(len(session_item)):
+            seq_h.append(torch.index_select(item_embedding, 0, session_item[i]))
+        seq_h1 = trans_to_cuda(torch.tensor(np.array([item.cpu().detach().numpy() for item in seq_h])))
+        session_emb = torch.div(torch.sum(seq_h1, 1), session_len)
+        # session_emb = self.SR_IEM(item_embedding, session_item, session_len, mask)
         session = [session_emb]
         DA = torch.mm(D, A).float()
         for i in range(self.layers):
@@ -543,7 +543,6 @@ class COTREC(Module):
 
     def calc_cl_loss(self, kg, item):
         embedding = self.embedding
-        #kg_embedding = self.calc_kg_emb(kg, e_feat)
         kg_embedding = self.calc_kg_emb(kg)
 
         zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
@@ -565,8 +564,8 @@ class COTREC(Module):
         if self.dataset == 'Tmall':
         # if self.dataset == '':
             # for Tmall dataset, we do not use position embedding to learn temporal order
-            sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
-            sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
+            sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
+            sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
         else:
             sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
             sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
@@ -598,8 +597,8 @@ class COTREC(Module):
         con_loss = self.SSL_topk(last, sess_emb_i, pos_emb_I, neg_emb_I)
         last = self.embedding[last_item]
         con_loss += self.SSL_topk(last, sess_emb_s, pos_emb_S, neg_emb_S)
-        # con_loss = self.SSL(sess_emb_i, sess_emb_s)
-        # con_loss=0
+        
+        reg_kg = 0
         return self.beta * con_loss, loss_item, scores_item[:,:self.n_item], reg_kg
 
     def test_loss(self, sessionID, session_item, session_len, D, A, reversed_sess_item, mask, epoch, tar, diff_mask, kg, g):
@@ -609,8 +608,8 @@ class COTREC(Module):
         item_embeddings_kg = self.calc_kg_emb(kg)
         if self.dataset == 'Tmall':
         # if self.dataset == '':
-            sess_emb_i = self.generate_sess_emb_npos(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
-            sess_emb_kg = self.generate_sess_emb_npos(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
+            sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len,reversed_sess_item, mask)
+            sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)
         else:
             sess_emb_i = self.generate_sess_emb(item_embeddings_i, session_item, session_len, reversed_sess_item, mask)
             sess_emb_kg = self.generate_sess_emb(item_embeddings_kg, session_item, session_len,reversed_sess_item, mask)

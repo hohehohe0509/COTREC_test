@@ -7,32 +7,6 @@ import time
 import collections
 import torch
 
-'''def data_masks(all_sessions, n_node):
-    adj = dict()
-    for sess in all_sessions:
-        for i, item in enumerate(sess):
-            if i == len(sess)-1:
-                break
-            else:
-                if sess[i] - 1 not in adj.keys():
-                    adj[sess[i]-1] = dict()
-                    adj[sess[i]-1][sess[i]-1] = 1
-                    adj[sess[i]-1][sess[i+1]-1] = 1
-                else:
-                    if sess[i+1]-1 not in adj[sess[i]-1].keys():
-                        adj[sess[i] - 1][sess[i + 1] - 1] = 1
-                    else:
-                        adj[sess[i]-1][sess[i+1]-1] += 1
-    row, col, data = [], [], []
-    for i in adj.keys():
-        item = adj[i]
-        for j in item.keys():
-            row.append(i)
-            col.append(j)
-            data.append(adj[i][j])
-    coo = coo_matrix((data, (row, col)), shape=(n_node, n_node))
-    return coo
-'''
 #itemID是從1開始
 #但是KG是從0開始，所以要把KG的ID換成從1開始
 #這邊的n_node有算進KG的entity數
@@ -59,23 +33,6 @@ def data_masks(all_sessions, n_node):
     matrix = csr_matrix((data, indices, indptr), shape=(n_session, n_node))
     return matrix, n_session, item_dict, np.array(inter_mat)
 
-'''
-def data_masks(all_sessions, n_node):
-    indptr, indices, data = [], [], []
-    indptr.append(0)
-    itemTOsess = [[] for row in range(n_node)]
-    for j in range(len(all_sessions)):
-        session, count = np.unique(all_sessions[j], return_counts=True)
-        length = len(session)
-        s = indptr[-1]
-        indptr.append((s + length))
-        for i in range(length):
-            indices.append(session[i]-1)
-            itemTOsess[session[i]-1].append(j)
-            data.append(count[i])
-    matrix = csr_matrix((data, indices, indptr), shape=(len(all_sessions), n_node))
-    return matrix, itemTOsess
-'''
 class Data():
     def __init__(self, dataset, data, all_train, opt, shuffle=False, n_item=None, n_node=None, KG=False):
         self.raw = np.asarray(data[0], dtype="object")
@@ -87,10 +44,6 @@ class Data():
         DH = DH.T
         DHBH_T = np.dot(DH,BH_T)
         self.adjacency = DHBH_T.tocoo()
-        #self.adjacency, self.itemTOsess = data_masks(self.raw, n_node)
-        '''adj = data_masks(all_train, n_node)
-        # # print(adj.sum(axis=0))
-        self.adjacency = adj.multiply(1.0/adj.sum(axis=0).reshape(1, -1))'''
         self.n_node = n_node
         self.n_items = n_item
         self.targets = np.asarray(data[1])
@@ -157,7 +110,7 @@ class Data():
         session_len = []
         reversed_sess_item = []
         mask = []
-        # item_set = set()
+        
         for session in inp:
             #假設一個session有[4,45,214,74,4]，下面這行會得到[0,1,2,3,4]
             nonzero_elems = np.nonzero(session)[0]
@@ -171,8 +124,7 @@ class Data():
             
             #這邊會把session內的item順序倒過來，然後一樣補長
             reversed_sess_item.append(list(reversed(session)) + (max_n_node - len(nonzero_elems)) * [0])
-        # item_set = list(item_set)
-        # index_list = [item_set.index(a) for a in self.targets[index]-1]
+        
 
         #我猜這個100是指batchSize
         diff_mask = np.ones(shape=[100, self.n_node]) * (1/(self.n_node - 1))
